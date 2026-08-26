@@ -21,6 +21,7 @@ use async_trait::async_trait;
 
 use super::UpdateSchemaAction;
 use super::apply::PendingSchemaUpdate;
+use super::column_properties::deleted_column_property_keys;
 use crate::table::Table;
 use crate::transaction::action::{ActionCommit, TransactionAction};
 use crate::{Result, TableRequirement, TableUpdate};
@@ -38,22 +39,31 @@ impl TransactionAction for UpdateSchemaAction {
             return Ok(ActionCommit::new(Vec::new(), Vec::new()));
         }
 
-        Ok(ActionCommit::new(
-            vec![
-                TableUpdate::AddSchema { schema },
-                TableUpdate::SetCurrentSchema { schema_id: -1 },
-            ],
-            vec![
-                TableRequirement::UuidMatch {
-                    uuid: table.metadata().uuid(),
-                },
-                TableRequirement::LastAssignedFieldIdMatch {
-                    last_assigned_field_id: last_column_id,
-                },
-                TableRequirement::CurrentSchemaIdMatch {
-                    current_schema_id: base_schema.schema_id(),
-                },
-            ],
-        ))
+        let mut updates = vec![
+            TableUpdate::AddSchema { schema },
+            TableUpdate::SetCurrentSchema { schema_id: -1 },
+        ];
+        let property_removals = deleted_column_property_keys(
+            table.metadata().properties(),
+            base_schema,
+            pending.deletes(),
+        );
+        if !property_removals.is_empty() {
+            updates.push(TableUpdate::RemoveProperties {
+                removals: property_removals,
+            });
+        }
+
+        Ok(ActionCommit::new(updates, vec![
+            TableRequirement::UuidMatch {
+                uuid: table.metadata().uuid(),
+            },
+            TableRequirement::LastAssignedFieldIdMatch {
+                last_assigned_field_id: last_column_id,
+            },
+            TableRequirement::CurrentSchemaIdMatch {
+                current_schema_id: base_schema.schema_id(),
+            },
+        ]))
     }
 }

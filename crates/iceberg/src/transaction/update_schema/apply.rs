@@ -224,6 +224,10 @@ impl<'a> PendingSchemaUpdate<'a> {
         }
         Ok(())
     }
+
+    pub(super) fn deletes(&self) -> &HashSet<i32> {
+        &self.deletes
+    }
 }
 
 fn precondition(message: impl Into<String>) -> Error {
