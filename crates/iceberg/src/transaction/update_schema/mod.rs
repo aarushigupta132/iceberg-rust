@@ -21,6 +21,7 @@ mod commit;
 mod fresh_ids;
 mod name_mapping;
 mod tree;
+mod type_promotion;
 
 #[cfg(test)]
 #[path = "tests/case_sensitive.rs"]
@@ -39,10 +40,13 @@ mod ordered_tests;
 mod rename_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+#[path = "tests/type_promotion.rs"]
+mod type_promotion_tests;
 
 use typed_builder::TypedBuilder;
 
-use crate::spec::{Literal, Type};
+use crate::spec::{Literal, PrimitiveType, Type};
 
 /// Declarative specification for adding a column in an [`UpdateSchemaAction`].
 ///
@@ -125,7 +129,14 @@ pub struct UpdateSchemaAction {
 enum SchemaOperation {
     Add(Box<AddColumn>),
     Delete(String),
-    Rename { name: String, new_name: String },
+    Rename {
+        name: String,
+        new_name: String,
+    },
+    UpdateType {
+        name: String,
+        new_type: PrimitiveType,
+    },
     SetCaseSensitive(bool),
 }
 
@@ -168,6 +179,18 @@ impl UpdateSchemaAction {
         self.operations.push(SchemaOperation::Rename {
             name: name.to_string(),
             new_name: new_name.to_string(),
+        });
+        self
+    }
+
+    /// Promote a primitive column to a compatible type.
+    ///
+    /// Supported promotions are `int` to `long`, `float` to `double`, and increasing decimal
+    /// precision without changing scale. The column's field ID and other metadata are preserved.
+    pub fn update_column_type(mut self, name: impl ToString, new_type: PrimitiveType) -> Self {
+        self.operations.push(SchemaOperation::UpdateType {
+            name: name.to_string(),
+            new_type,
         });
         self
     }

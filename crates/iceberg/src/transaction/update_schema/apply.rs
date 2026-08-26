@@ -20,8 +20,11 @@ use std::sync::Arc;
 
 use super::fresh_ids::assign_fresh_ids;
 use super::tree::{index_parent_ids, rebuild_fields};
+use super::type_promotion::{is_promotion_allowed, promote_default, validated_primitive_type};
 use super::{AddColumn, SchemaOperation};
-use crate::spec::{NestedField, NestedFieldRef, SCHEMA_NAME_DELIMITER, Schema, Type};
+use crate::spec::{
+    NestedField, NestedFieldRef, PrimitiveType, SCHEMA_NAME_DELIMITER, Schema, Type,
+};
 use crate::{Error, ErrorKind, Result};
 
 // A new field receives its real ID when operations are replayed at commit time.
@@ -47,6 +50,7 @@ pub(super) struct PendingSchemaUpdate<'a> {
     updates: HashMap<i32, NestedFieldRef>,
     deletes: HashSet<i32>,
     additions: HashMap<Option<i32>, Vec<i32>>,
+    added_name_to_id: HashMap<String, i32>,
     id_to_parent: HashMap<i32, i32>,
     identifier_field_ids: HashSet<i32>,
     last_column_id: i32,
@@ -63,6 +67,7 @@ impl<'a> PendingSchemaUpdate<'a> {
             updates: HashMap::new(),
             deletes: HashSet::new(),
             additions: HashMap::new(),
+            added_name_to_id: HashMap::new(),
             id_to_parent,
             identifier_field_ids: schema.identifier_field_ids().collect(),
             last_column_id,
@@ -76,6 +81,9 @@ impl<'a> PendingSchemaUpdate<'a> {
                 SchemaOperation::Add(add) => self.add_column(add)?,
                 SchemaOperation::Delete(name) => self.delete_column(name)?,
                 SchemaOperation::Rename { name, new_name } => self.rename_column(name, new_name)?,
+                SchemaOperation::UpdateType { name, new_type } => {
+                    self.update_column_type(name, new_type)?
+                }
                 SchemaOperation::SetCaseSensitive(case_sensitive) => {
                     self.case_sensitive = *case_sensitive;
                 }
@@ -153,6 +161,8 @@ impl<'a> PendingSchemaUpdate<'a> {
         }
 
         let field = assign_fresh_ids(&add.to_nested_field(), &mut self.last_column_id)?;
+        self.added_name_to_id
+            .insert(self.case_sensitivity_aware_name(&full_name), field.id);
         self.additions.entry(parent_id).or_default().push(field.id);
         self.updates.insert(field.id, field);
         Ok(())
@@ -203,6 +213,52 @@ impl<'a> PendingSchemaUpdate<'a> {
         Ok(())
     }
 
+    fn update_column_type(&mut self, name: &str, new_type: &PrimitiveType) -> Result<()> {
+        let field = self
+            .find_for_update(name)?
+            .ok_or_else(|| precondition(format!("Cannot update missing column: {name}")))?;
+        if self.deletes.contains(&field.id) {
+            return Err(precondition(format!(
+                "Cannot update a column that will be deleted: {}",
+                field.name
+            )));
+        }
+
+        let old_type = field.field_type.as_ref();
+        let promoted_type = validated_primitive_type(new_type).map_err(|error| {
+            precondition(format!(
+                "Cannot change column type: {name}: {old_type} -> {new_type}"
+            ))
+            .with_source(error)
+        })?;
+        if old_type == &promoted_type {
+            return Ok(());
+        }
+        if !is_promotion_allowed(old_type, new_type) {
+            return Err(precondition(format!(
+                "Cannot change column type: {name}: {old_type} -> {new_type}"
+            )));
+        }
+
+        let old_primitive = old_type
+            .as_primitive_type()
+            .expect("promotion source must be primitive");
+        let mut updated = (*field).clone();
+        updated.field_type = Box::new(promoted_type.clone());
+        updated.initial_default = promote_default(
+            updated.initial_default.as_ref(),
+            old_primitive,
+            &promoted_type,
+        )?;
+        updated.write_default = promote_default(
+            updated.write_default.as_ref(),
+            old_primitive,
+            &promoted_type,
+        )?;
+        self.updates.insert(updated.id, Arc::new(updated));
+        Ok(())
+    }
+
     fn resolve_parent(&self, parent: &str) -> Result<i32> {
         let parent_field = self
             .resolve_field(parent)?
@@ -239,6 +295,31 @@ impl<'a> PendingSchemaUpdate<'a> {
         } else {
             validate_case_insensitive_names(self.schema)?;
             Ok(self.schema.field_by_name_case_insensitive(name))
+        }
+    }
+
+    fn find_for_update(&self, name: &str) -> Result<Option<NestedFieldRef>> {
+        if let Some(existing) = self.resolve_field(name)? {
+            return Ok(Some(
+                self.updates
+                    .get(&existing.id)
+                    .cloned()
+                    .unwrap_or_else(|| existing.clone()),
+            ));
+        }
+
+        Ok(self
+            .added_name_to_id
+            .get(&self.case_sensitivity_aware_name(name))
+            .and_then(|id| self.updates.get(id))
+            .cloned())
+    }
+
+    fn case_sensitivity_aware_name(&self, name: &str) -> String {
+        if self.case_sensitive {
+            name.to_string()
+        } else {
+            name.to_lowercase()
         }
     }
 
