@@ -21,6 +21,9 @@ mod fresh_ids;
 mod tree;
 
 #[cfg(test)]
+#[path = "tests/docs.rs"]
+mod docs_tests;
+#[cfg(test)]
 #[path = "tests/ordered.rs"]
 mod ordered_tests;
 #[cfg(test)]
@@ -111,6 +114,7 @@ pub struct UpdateSchemaAction {
 enum SchemaOperation {
     Add(Box<AddColumn>),
     Delete(String),
+    UpdateDoc { name: String, doc: Option<String> },
 }
 
 impl UpdateSchemaAction {
@@ -142,6 +146,17 @@ impl UpdateSchemaAction {
     pub fn delete_column(mut self, name: impl ToString) -> Self {
         self.operations
             .push(SchemaOperation::Delete(name.to_string()));
+        self
+    }
+
+    /// Set or clear a column's documentation string.
+    ///
+    /// Pass `Some(doc)` to replace the current documentation or `None` to clear it.
+    pub fn update_column_doc(mut self, name: impl ToString, doc: Option<String>) -> Self {
+        self.operations.push(SchemaOperation::UpdateDoc {
+            name: name.to_string(),
+            doc,
+        });
         self
     }
 }

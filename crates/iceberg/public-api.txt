@@ -3268,6 +3268,7 @@ pub struct iceberg::transaction::UpdateSchemaAction
 impl iceberg::transaction::UpdateSchemaAction
 pub fn iceberg::transaction::UpdateSchemaAction::add_column(self, add_column: iceberg::transaction::AddColumn) -> Self
 pub fn iceberg::transaction::UpdateSchemaAction::delete_column(self, name: impl alloc::string::ToString) -> Self
+pub fn iceberg::transaction::UpdateSchemaAction::update_column_doc(self, name: impl alloc::string::ToString, doc: core::option::Option<alloc::string::String>) -> Self
 pub struct iceberg::transaction::UpdateStatisticsAction
 impl iceberg::transaction::UpdateStatisticsAction
 pub fn iceberg::transaction::UpdateStatisticsAction::remove_statistics(self, snapshot_id: i64) -> Self

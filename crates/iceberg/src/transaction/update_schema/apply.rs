@@ -47,6 +47,7 @@ pub(super) struct PendingSchemaUpdate<'a> {
     updates: HashMap<i32, NestedFieldRef>,
     deletes: HashSet<i32>,
     additions: HashMap<Option<i32>, Vec<i32>>,
+    added_name_to_id: HashMap<String, i32>,
     id_to_parent: HashMap<i32, i32>,
     identifier_field_ids: HashSet<i32>,
     last_column_id: i32,
@@ -62,6 +63,7 @@ impl<'a> PendingSchemaUpdate<'a> {
             updates: HashMap::new(),
             deletes: HashSet::new(),
             additions: HashMap::new(),
+            added_name_to_id: HashMap::new(),
             id_to_parent,
             identifier_field_ids: schema.identifier_field_ids().collect(),
             last_column_id,
@@ -73,6 +75,7 @@ impl<'a> PendingSchemaUpdate<'a> {
             match operation {
                 SchemaOperation::Add(add) => self.add_column(add)?,
                 SchemaOperation::Delete(name) => self.delete_column(name)?,
+                SchemaOperation::UpdateDoc { name, doc } => self.update_doc(name, doc.clone())?,
             }
         }
         Ok(())
@@ -141,6 +144,7 @@ impl<'a> PendingSchemaUpdate<'a> {
         }
 
         let field = assign_fresh_ids(&add.to_nested_field(), &mut self.last_column_id)?;
+        self.added_name_to_id.insert(full_name, field.id);
         self.additions.entry(parent_id).or_default().push(field.id);
         self.updates.insert(field.id, field);
         Ok(())
@@ -157,9 +161,56 @@ impl<'a> PendingSchemaUpdate<'a> {
                 "Cannot delete a column that has additions: {name}"
             )));
         }
+        if self.updates.contains_key(&field.id) {
+            return Err(precondition(format!(
+                "Cannot delete a column that has updates: {name}"
+            )));
+        }
 
         self.deletes.insert(field.id);
         Ok(())
+    }
+
+    fn update_doc(&mut self, name: &str, doc: Option<String>) -> Result<()> {
+        let field = self.field_for_update(name)?;
+        if self.deletes.contains(&field.id) {
+            return Err(precondition(format!(
+                "Cannot update a column that will be deleted: {}",
+                field.name
+            )));
+        }
+        if field.doc == doc {
+            return Ok(());
+        }
+
+        let mut updated = (*field).clone();
+        updated.doc = doc;
+        self.updates.insert(updated.id, Arc::new(updated));
+        Ok(())
+    }
+
+    fn field_for_update(&self, name: &str) -> Result<NestedFieldRef> {
+        if name.is_empty() {
+            return Err(precondition("Invalid column name: (empty)"));
+        }
+        if let Some(field) = self.schema.field_by_name(name) {
+            return Ok(self
+                .updates
+                .get(&field.id)
+                .cloned()
+                .unwrap_or_else(|| field.clone()));
+        }
+        if let Some(id) = self.added_name_to_id.get(name) {
+            return self.updates.get(id).cloned().ok_or_else(|| {
+                Error::new(
+                    ErrorKind::Unexpected,
+                    "Added column is missing its pending field",
+                )
+            });
+        }
+        Err(precondition(format!(
+            "Cannot update missing column: {name}"
+        )))
     }
 
     fn resolve_parent(&self, parent: &str) -> Result<i32> {

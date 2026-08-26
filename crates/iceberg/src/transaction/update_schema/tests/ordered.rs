@@ -41,7 +41,7 @@ async fn updated_schema(table: &Table, action: UpdateSchemaAction) -> Schema {
     }
 }
 
-fn replace_current_schema(table: &Table, schema: Schema) -> Table {
+pub(super) fn replace_current_schema(table: &Table, schema: Schema) -> Table {
     let metadata = table
         .metadata()
         .clone()
@@ -82,7 +82,7 @@ fn table_with_nested_identifier() -> Table {
     replace_current_schema(&table, schema)
 }
 
-fn table_with_struct_map_key() -> Table {
+pub(super) fn table_with_struct_map_key() -> Table {
     let table = crate::transaction::tests::make_v2_table();
     let mut fields = table
         .metadata()
