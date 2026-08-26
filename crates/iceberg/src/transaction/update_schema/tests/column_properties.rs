@@ -57,6 +57,16 @@ fn property_removals(updates: &[TableUpdate]) -> Option<&[String]> {
     })
 }
 
+fn apply_updates(table: &Table, updates: &[TableUpdate]) -> Table {
+    let mut builder = table.metadata().clone().into_builder(None);
+    for update in updates {
+        builder = update.clone().apply(builder).unwrap();
+    }
+    table
+        .clone()
+        .with_metadata(Arc::new(builder.build().unwrap().metadata))
+}
+
 #[tokio::test]
 async fn deletes_exact_supported_column_properties() {
     let mut properties = HashMap::from([
@@ -151,5 +161,180 @@ async fn same_name_replacement_drops_the_deleted_fields_configuration() {
     assert_eq!(
         property_removals(&updates),
         Some([format!("{prefix}z")].as_slice())
+    );
+}
+
+#[tokio::test]
+async fn renames_exact_supported_root_and_nested_properties() {
+    let unsupported_key = "write.parquet.bloom-filter-fpp.column.z";
+    let mut properties = HashMap::from([(unsupported_key.to_string(), "0.01".to_string())]);
+    for prefix in SUPPORTED_PREFIXES {
+        properties.insert(format!("{prefix}z"), "root".to_string());
+        properties.insert(format!("{prefix}person.name"), "nested".to_string());
+    }
+    let table = with_properties(make_v2_table_with_nested(), properties);
+    let action = Transaction::new(&table)
+        .update_schema()
+        .rename_column("z", "payload")
+        .rename_column("person", "profile")
+        .rename_column("person.name", "full_name");
+    let updates = updates(&table, action).await;
+    let committed = apply_updates(&table, &updates);
+
+    for prefix in SUPPORTED_PREFIXES {
+        assert_eq!(
+            committed
+                .metadata()
+                .properties()
+                .get(&format!("{prefix}payload"))
+                .map(String::as_str),
+            Some("root")
+        );
+        assert_eq!(
+            committed
+                .metadata()
+                .properties()
+                .get(&format!("{prefix}profile.full_name"))
+                .map(String::as_str),
+            Some("nested")
+        );
+        assert!(
+            !committed
+                .metadata()
+                .properties()
+                .contains_key(&format!("{prefix}z"))
+        );
+        assert!(
+            !committed
+                .metadata()
+                .properties()
+                .contains_key(&format!("{prefix}person.name"))
+        );
+    }
+    assert_eq!(
+        committed
+            .metadata()
+            .properties()
+            .get(unsupported_key)
+            .map(String::as_str),
+        Some("0.01")
+    );
+}
+
+#[tokio::test]
+async fn swaps_column_property_ownership() {
+    let prefix = "write.metadata.metrics.column.";
+    let table = with_properties(
+        make_v2_table_with_nested(),
+        HashMap::from([
+            (format!("{prefix}z"), "z-value".to_string()),
+            (format!("{prefix}person"), "person-value".to_string()),
+        ]),
+    );
+    let action = Transaction::new(&table)
+        .update_schema()
+        .rename_column("z", "person")
+        .rename_column("person", "z");
+    let updates = updates(&table, action).await;
+    let committed = apply_updates(&table, &updates);
+
+    assert_eq!(
+        committed
+            .metadata()
+            .properties()
+            .get(&format!("{prefix}person"))
+            .map(String::as_str),
+        Some("z-value")
+    );
+    assert_eq!(
+        committed
+            .metadata()
+            .properties()
+            .get(&format!("{prefix}z"))
+            .map(String::as_str),
+        Some("person-value")
+    );
+}
+
+#[tokio::test]
+async fn rename_wins_when_the_destination_column_is_deleted() {
+    let prefix = "write.metadata.metrics.column.";
+    let table = with_properties(
+        make_v2_table_with_nested(),
+        HashMap::from([
+            (format!("{prefix}person.name"), "source".to_string()),
+            (format!("{prefix}person.age"), "destination".to_string()),
+        ]),
+    );
+    let action = Transaction::new(&table)
+        .update_schema()
+        .delete_column("person.age")
+        .rename_column("person.name", "age");
+    let updates = updates(&table, action).await;
+
+    assert_eq!(
+        property_removals(&updates),
+        Some(
+            [
+                format!("{prefix}person.age"),
+                format!("{prefix}person.name"),
+            ]
+            .as_slice()
+        )
+    );
+    let committed = apply_updates(&table, &updates);
+    assert_eq!(
+        committed
+            .metadata()
+            .properties()
+            .get(&format!("{prefix}person.age"))
+            .map(String::as_str),
+        Some("source")
+    );
+    assert!(
+        !committed
+            .metadata()
+            .properties()
+            .contains_key(&format!("{prefix}person.name"))
+    );
+}
+
+#[tokio::test]
+async fn parent_rename_does_not_rewrite_descendant_properties() {
+    let prefix = "write.metadata.metrics.column.";
+    let table = with_properties(
+        make_v2_table_with_nested(),
+        HashMap::from([
+            (format!("{prefix}person"), "parent".to_string()),
+            (format!("{prefix}person.name"), "descendant".to_string()),
+        ]),
+    );
+    let action = Transaction::new(&table)
+        .update_schema()
+        .rename_column("person", "profile");
+    let updates = updates(&table, action).await;
+    let committed = apply_updates(&table, &updates);
+
+    assert_eq!(
+        committed
+            .metadata()
+            .properties()
+            .get(&format!("{prefix}profile"))
+            .map(String::as_str),
+        Some("parent")
+    );
+    assert_eq!(
+        committed
+            .metadata()
+            .properties()
+            .get(&format!("{prefix}person.name"))
+            .map(String::as_str),
+        Some("descendant")
+    );
+    assert!(
+        !committed
+            .metadata()
+            .properties()
+            .contains_key(&format!("{prefix}profile.name"))
     );
 }

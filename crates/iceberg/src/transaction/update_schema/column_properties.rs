@@ -25,26 +25,59 @@ const COLUMN_PROPERTY_PREFIXES: [&str; 3] = [
     "write.parquet.stats-enabled.column.",
 ];
 
-pub(super) fn deleted_column_property_keys(
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct ColumnPropertyChanges {
+    pub(super) removals: Vec<String>,
+    pub(super) updates: HashMap<String, String>,
+}
+
+impl ColumnPropertyChanges {
+    pub(super) fn is_empty(&self) -> bool {
+        self.removals.is_empty() && self.updates.is_empty()
+    }
+}
+
+pub(super) fn column_property_changes(
     properties: &HashMap<String, String>,
-    schema: &Schema,
-    deleted_field_ids: &HashSet<i32>,
-) -> Vec<String> {
-    let deleted_columns: HashSet<&str> = deleted_field_ids
+    base_schema: &Schema,
+    updated_schema: &Schema,
+    updates: &HashMap<i32, crate::spec::NestedFieldRef>,
+    deletes: &HashSet<i32>,
+    additions: &HashMap<Option<i32>, Vec<i32>>,
+) -> ColumnPropertyChanges {
+    let deleted_columns: HashSet<&str> = deletes
         .iter()
-        .filter_map(|id| schema.name_by_field_id(*id))
+        .filter_map(|id| base_schema.name_by_field_id(*id))
+        .collect();
+    let added_ids: HashSet<i32> = additions.values().flatten().copied().collect();
+    let renamed_columns: HashMap<&str, &str> = updates
+        .keys()
+        .filter(|id| !added_ids.contains(id))
+        .filter_map(|id| {
+            let old_name = base_schema.name_by_field_id(*id)?;
+            let new_name = updated_schema.name_by_field_id(*id)?;
+            (old_name != new_name).then_some((old_name, new_name))
+        })
         .collect();
 
-    let mut removals = properties
-        .keys()
-        .filter(|key| {
-            COLUMN_PROPERTY_PREFIXES.iter().any(|prefix| {
-                key.strip_prefix(prefix)
-                    .is_some_and(|column| deleted_columns.contains(column))
-            })
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    removals.sort();
-    removals
+    let mut changes = ColumnPropertyChanges::default();
+    for (key, value) in properties {
+        let Some(prefix) = COLUMN_PROPERTY_PREFIXES
+            .iter()
+            .find(|prefix| key.starts_with(**prefix))
+        else {
+            continue;
+        };
+        let column_name = &key[prefix.len()..];
+        if let Some(new_name) = renamed_columns.get(column_name) {
+            changes.removals.push(key.clone());
+            changes
+                .updates
+                .insert(format!("{prefix}{new_name}"), value.clone());
+        } else if deleted_columns.contains(column_name) {
+            changes.removals.push(key.clone());
+        }
+    }
+    changes.removals.sort();
+    changes
 }

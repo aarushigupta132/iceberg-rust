@@ -461,3 +461,236 @@ async fn nested_additions_are_ignored_when_the_parent_is_not_mapped() {
 
     assert!(mapping_json(&updates).is_none());
 }
+
+#[tokio::test]
+async fn mapping_tracks_root_and_nested_renames() {
+    let table = with_properties(
+        make_v2_table_with_nested(),
+        HashMap::from([(
+            DEFAULT_SCHEMA_NAME_MAPPING.to_string(),
+            r#"[
+                {"field-id":3,"names":["z"]},
+                {"field-id":4,"names":["person"],"fields":[
+                    {"field-id":5,"names":["name"]}
+                ]}
+            ]"#
+            .to_string(),
+        )]),
+    );
+    let action = Transaction::new(&table)
+        .update_schema()
+        .rename_column("z", "payload")
+        .rename_column("person", "profile")
+        .rename_column("person.name", "full_name");
+    let (updates, _) = commit_parts(&table, action).await;
+    let mapping: NameMapping = serde_json::from_str(mapping_json(&updates).unwrap()).unwrap();
+
+    assert_eq!(mapped_names(&mapping, 3), ["z", "payload"]);
+    assert_eq!(mapped_names(&mapping, 4), ["person", "profile"]);
+    assert_eq!(mapped_names(&mapping, 5), ["name", "full_name"]);
+}
+
+#[tokio::test]
+async fn mapping_reassigns_aliases_during_swaps() {
+    let table = with_properties(
+        make_v2_table_with_nested(),
+        HashMap::from([(
+            DEFAULT_SCHEMA_NAME_MAPPING.to_string(),
+            r#"[
+                {"field-id":3,"names":["z"]},
+                {"field-id":4,"names":["person"]}
+            ]"#
+            .to_string(),
+        )]),
+    );
+    let action = Transaction::new(&table)
+        .update_schema()
+        .rename_column("z", "person")
+        .rename_column("person", "z");
+    let (updates, _) = commit_parts(&table, action).await;
+    let mapping: NameMapping = serde_json::from_str(mapping_json(&updates).unwrap()).unwrap();
+
+    assert_eq!(mapped_names(&mapping, 3), ["person"]);
+    assert_eq!(mapped_names(&mapping, 4), ["z"]);
+}
+
+#[tokio::test]
+async fn mapping_reassigns_a_deleted_destinations_alias() {
+    let table = with_properties(
+        make_v2_table_with_nested(),
+        HashMap::from([(
+            DEFAULT_SCHEMA_NAME_MAPPING.to_string(),
+            r#"[
+                {"field-id":4,"names":["person"],"fields":[
+                    {"field-id":5,"names":["name"]},
+                    {"field-id":6,"names":["age"]}
+                ]}
+            ]"#
+            .to_string(),
+        )]),
+    );
+    let action = Transaction::new(&table)
+        .update_schema()
+        .delete_column("person.age")
+        .rename_column("person.name", "age");
+    let (updates, _) = commit_parts(&table, action).await;
+    let mapping: NameMapping = serde_json::from_str(mapping_json(&updates).unwrap()).unwrap();
+
+    assert_eq!(mapped_names(&mapping, 5), ["name", "age"]);
+    assert!(mapped_names(&mapping, 6).is_empty());
+}
+
+#[tokio::test]
+async fn rename_output_conflicts_leave_the_mapping_unchanged() {
+    let raw_mapping = r#"[
+        {"field-id":3,"names":["z"]},
+        {"field-id":20,"names":["a"],"fields":[
+            {"field-id":21,"names":["b"]}
+        ]}
+    ]"#;
+    let table = with_properties(
+        make_v2_table_with_nested(),
+        HashMap::from([(
+            DEFAULT_SCHEMA_NAME_MAPPING.to_string(),
+            raw_mapping.to_string(),
+        )]),
+    );
+    let action = Transaction::new(&table)
+        .update_schema()
+        .rename_column("z", "a.b");
+    let (updates, _) = commit_parts(&table, action).await;
+
+    assert!(mapping_json(&updates).is_none());
+    let committed = apply_updates(&table, &updates);
+    assert_eq!(
+        committed
+            .metadata()
+            .properties()
+            .get(DEFAULT_SCHEMA_NAME_MAPPING)
+            .map(String::as_str),
+        Some(raw_mapping)
+    );
+    assert_eq!(
+        committed
+            .metadata()
+            .current_schema()
+            .field_by_id(3)
+            .unwrap()
+            .name,
+        "a.b"
+    );
+}
+
+#[tokio::test]
+async fn no_op_rename_can_repair_a_missing_mapping_alias() {
+    let table = with_properties(
+        make_v2_table_with_nested(),
+        HashMap::from([(
+            DEFAULT_SCHEMA_NAME_MAPPING.to_string(),
+            r#"[{"field-id":3,"names":["legacy_z"]}]"#.to_string(),
+        )]),
+    );
+    let action = Transaction::new(&table)
+        .update_schema()
+        .rename_column("z", "z");
+    let (updates, requirements) = commit_parts(&table, action).await;
+
+    assert_eq!(updates.len(), 1);
+    assert!(matches!(updates[0], TableUpdate::SetProperties { .. }));
+    let mapping: NameMapping = serde_json::from_str(mapping_json(&updates).unwrap()).unwrap();
+    assert_eq!(mapped_names(&mapping, 3), ["legacy_z", "z"]);
+    assert_eq!(requirements, vec![
+        TableRequirement::UuidMatch {
+            uuid: table.metadata().uuid(),
+        },
+        TableRequirement::CurrentSchemaIdMatch {
+            current_schema_id: table.metadata().current_schema().schema_id(),
+        },
+    ]);
+}
+
+#[tokio::test]
+async fn pseudo_field_rename_can_commit_only_a_mapping_alias() {
+    let table = with_properties(
+        make_v2_table_with_nested(),
+        HashMap::from([(
+            DEFAULT_SCHEMA_NAME_MAPPING.to_string(),
+            r#"[
+                {"field-id":7,"names":["tags"],"fields":[
+                    {"field-id":8,"names":["element"]}
+                ]}
+            ]"#
+            .to_string(),
+        )]),
+    );
+    let action = Transaction::new(&table)
+        .update_schema()
+        .rename_column("tags.element", "item");
+    let (updates, requirements) = commit_parts(&table, action).await;
+
+    assert_eq!(updates.len(), 1);
+    assert!(matches!(updates[0], TableUpdate::SetProperties { .. }));
+    let mapping: NameMapping = serde_json::from_str(mapping_json(&updates).unwrap()).unwrap();
+    assert_eq!(mapped_names(&mapping, 8), ["element", "item"]);
+    assert_eq!(requirements, vec![
+        TableRequirement::UuidMatch {
+            uuid: table.metadata().uuid(),
+        },
+        TableRequirement::CurrentSchemaIdMatch {
+            current_schema_id: table.metadata().current_schema().schema_id(),
+        },
+    ]);
+}
+
+#[tokio::test]
+async fn invalid_mapping_does_not_block_renamed_column_properties() {
+    let raw_mapping = "{not valid json";
+    let old_metrics_key = "write.metadata.metrics.column.z";
+    let new_metrics_key = "write.metadata.metrics.column.payload";
+    let table = with_properties(
+        make_v2_table_with_nested(),
+        HashMap::from([
+            (
+                DEFAULT_SCHEMA_NAME_MAPPING.to_string(),
+                raw_mapping.to_string(),
+            ),
+            (old_metrics_key.to_string(), "full".to_string()),
+        ]),
+    );
+    let action = Transaction::new(&table)
+        .update_schema()
+        .rename_column("z", "payload");
+    let (updates, _) = commit_parts(&table, action).await;
+
+    assert!(mapping_json(&updates).is_none());
+    let committed = apply_updates(&table, &updates);
+    assert_eq!(
+        committed
+            .metadata()
+            .properties()
+            .get(DEFAULT_SCHEMA_NAME_MAPPING)
+            .map(String::as_str),
+        Some(raw_mapping)
+    );
+    assert_eq!(
+        committed
+            .metadata()
+            .properties()
+            .get(new_metrics_key)
+            .map(String::as_str),
+        Some("full")
+    );
+    assert!(
+        !committed
+            .metadata()
+            .properties()
+            .contains_key(old_metrics_key)
+    );
+    assert!(
+        committed
+            .metadata()
+            .current_schema()
+            .field_by_name("payload")
+            .is_some()
+    );
+}

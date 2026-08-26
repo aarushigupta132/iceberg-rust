@@ -73,6 +73,7 @@ impl<'a> PendingSchemaUpdate<'a> {
             match operation {
                 SchemaOperation::Add(add) => self.add_column(add)?,
                 SchemaOperation::Delete(name) => self.delete_column(name)?,
+                SchemaOperation::Rename { name, new_name } => self.rename_column(name, new_name)?,
             }
         }
         Ok(())
@@ -157,8 +158,39 @@ impl<'a> PendingSchemaUpdate<'a> {
                 "Cannot delete a column that has additions: {name}"
             )));
         }
+        if self.updates.contains_key(&field.id) {
+            return Err(precondition(format!(
+                "Cannot delete a column that has updates: {name}"
+            )));
+        }
 
         self.deletes.insert(field.id);
+        Ok(())
+    }
+
+    fn rename_column(&mut self, name: &str, new_name: &str) -> Result<()> {
+        if name.is_empty() {
+            return Err(precondition("Invalid column name: (empty)"));
+        }
+        let field = self
+            .schema
+            .field_by_name(name)
+            .ok_or_else(|| precondition(format!("Cannot rename missing column: {name}")))?;
+        if self.deletes.contains(&field.id) {
+            return Err(precondition(format!(
+                "Cannot rename a column that will be deleted: {}",
+                field.name
+            )));
+        }
+
+        let current = self
+            .updates
+            .get(&field.id)
+            .cloned()
+            .unwrap_or_else(|| field.clone());
+        let mut updated = (*current).clone();
+        updated.name = new_name.to_string();
+        self.updates.insert(updated.id, Arc::new(updated));
         Ok(())
     }
 

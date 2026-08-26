@@ -21,7 +21,7 @@ use async_trait::async_trait;
 
 use super::UpdateSchemaAction;
 use super::apply::PendingSchemaUpdate;
-use super::column_properties::deleted_column_property_keys;
+use super::column_properties::column_property_changes;
 use super::name_mapping::update_name_mapping_json;
 use crate::spec::DEFAULT_SCHEMA_NAME_MAPPING;
 use crate::table::Table;
@@ -36,25 +36,16 @@ impl TransactionAction for UpdateSchemaAction {
         let mut pending = PendingSchemaUpdate::new(base_schema, last_column_id);
         pending.apply_operations(&self.operations)?;
         let schema = pending.apply()?;
+        let schema_changed = !schema.is_same_schema(base_schema);
 
-        if schema.is_same_schema(base_schema) {
-            return Ok(ActionCommit::new(Vec::new(), Vec::new()));
-        }
-
-        let mut updates = vec![
-            TableUpdate::AddSchema { schema },
-            TableUpdate::SetCurrentSchema { schema_id: -1 },
-        ];
-        let property_removals = deleted_column_property_keys(
+        let mut property_changes = column_property_changes(
             table.metadata().properties(),
             base_schema,
+            &schema,
+            pending.updates(),
             pending.deletes(),
+            pending.additions(),
         );
-        if !property_removals.is_empty() {
-            updates.push(TableUpdate::RemoveProperties {
-                removals: property_removals,
-            });
-        }
         if let Some(raw_mapping) = table
             .metadata()
             .properties()
@@ -62,10 +53,9 @@ impl TransactionAction for UpdateSchemaAction {
         {
             match update_name_mapping_json(raw_mapping, pending.updates(), pending.additions()) {
                 Ok(Some(updated_mapping)) => {
-                    updates.push(TableUpdate::SetProperties {
-                        updates: [(DEFAULT_SCHEMA_NAME_MAPPING.to_string(), updated_mapping)]
-                            .into(),
-                    });
+                    property_changes
+                        .updates
+                        .insert(DEFAULT_SCHEMA_NAME_MAPPING.to_string(), updated_mapping);
                 }
                 Ok(None) => {}
                 Err(error) => {
@@ -77,16 +67,40 @@ impl TransactionAction for UpdateSchemaAction {
             }
         }
 
-        Ok(ActionCommit::new(updates, vec![
-            TableRequirement::UuidMatch {
-                uuid: table.metadata().uuid(),
-            },
-            TableRequirement::LastAssignedFieldIdMatch {
+        if !schema_changed && property_changes.is_empty() {
+            return Ok(ActionCommit::new(Vec::new(), Vec::new()));
+        }
+
+        let mut updates = Vec::new();
+        if schema_changed {
+            updates.extend([
+                TableUpdate::AddSchema { schema },
+                TableUpdate::SetCurrentSchema { schema_id: -1 },
+            ]);
+        }
+        if !property_changes.removals.is_empty() {
+            updates.push(TableUpdate::RemoveProperties {
+                removals: property_changes.removals,
+            });
+        }
+        if !property_changes.updates.is_empty() {
+            updates.push(TableUpdate::SetProperties {
+                updates: property_changes.updates,
+            });
+        }
+
+        let mut requirements = vec![TableRequirement::UuidMatch {
+            uuid: table.metadata().uuid(),
+        }];
+        if schema_changed {
+            requirements.push(TableRequirement::LastAssignedFieldIdMatch {
                 last_assigned_field_id: last_column_id,
-            },
-            TableRequirement::CurrentSchemaIdMatch {
-                current_schema_id: base_schema.schema_id(),
-            },
-        ]))
+            });
+        }
+        requirements.push(TableRequirement::CurrentSchemaIdMatch {
+            current_schema_id: base_schema.schema_id(),
+        });
+
+        Ok(ActionCommit::new(updates, requirements))
     }
 }

@@ -32,6 +32,9 @@ mod name_mapping_tests;
 #[path = "tests/ordered.rs"]
 mod ordered_tests;
 #[cfg(test)]
+#[path = "tests/rename.rs"]
+mod rename_tests;
+#[cfg(test)]
 mod tests;
 
 use typed_builder::TypedBuilder;
@@ -119,6 +122,7 @@ pub struct UpdateSchemaAction {
 enum SchemaOperation {
     Add(Box<AddColumn>),
     Delete(String),
+    Rename { name: String, new_name: String },
 }
 
 impl UpdateSchemaAction {
@@ -150,6 +154,17 @@ impl UpdateSchemaAction {
     pub fn delete_column(mut self, name: impl ToString) -> Self {
         self.operations
             .push(SchemaOperation::Delete(name.to_string()));
+        self
+    }
+
+    /// Rename a column while preserving its field ID and other metadata.
+    ///
+    /// Operations in the same action continue to resolve the column by its original schema name.
+    pub fn rename_column(mut self, name: impl ToString, new_name: impl ToString) -> Self {
+        self.operations.push(SchemaOperation::Rename {
+            name: name.to_string(),
+            new_name: new_name.to_string(),
+        });
         self
     }
 }
