@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use super::fresh_ids::assign_fresh_ids;
 use super::{AddColumn, UpdateSchemaAction};
 use crate::spec::{
     ListType, MapType, NestedField, NestedFieldRef, SCHEMA_NAME_DELIMITER, Schema, StructType, Type,
@@ -44,65 +45,6 @@ impl AddColumn {
         field.initial_default = self.initial_default.clone();
         field.write_default = self.write_default.clone();
         Arc::new(field)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ID assignment helpers
-// ---------------------------------------------------------------------------
-
-/// Recursively assign fresh field IDs to a `NestedField` and all its nested sub-fields.
-///
-/// This follows the same recursive pattern as `ReassignFieldIds::reassign_ids_visit_type`
-/// from `crate::spec::schema::id_reassigner`, but operates on new fields with placeholder
-/// IDs rather than reassigning an existing schema. `ReassignFieldIds` cannot be used
-/// directly here because it rejects duplicate old IDs (all new fields share placeholder
-/// ID `DEFAULT_FIELD_ID`).
-pub(super) fn assign_fresh_ids(field: &NestedField, next_id: &mut i32) -> NestedFieldRef {
-    *next_id += 1;
-    let new_id = *next_id;
-    let new_type = assign_fresh_ids_to_type(&field.field_type, next_id);
-
-    Arc::new(NestedField {
-        id: new_id,
-        name: field.name.clone(),
-        required: field.required,
-        field_type: Box::new(new_type),
-        doc: field.doc.clone(),
-        initial_default: field.initial_default.clone(),
-        write_default: field.write_default.clone(),
-    })
-}
-
-/// Recursively assign fresh field IDs to all nested fields within a `Type`.
-fn assign_fresh_ids_to_type(field_type: &Type, next_id: &mut i32) -> Type {
-    match field_type {
-        Type::Primitive(_) => field_type.clone(),
-        // Variant carries no nested fields, so there is nothing to reassign
-        // (matches id_reassigner.rs).
-        Type::Variant(v) => Type::Variant(*v),
-        Type::Struct(struct_type) => {
-            let new_fields: Vec<NestedFieldRef> = struct_type
-                .fields()
-                .iter()
-                .map(|f| assign_fresh_ids(f, next_id))
-                .collect();
-            Type::Struct(StructType::new(new_fields))
-        }
-        Type::List(list_type) => {
-            let new_element = assign_fresh_ids(&list_type.element_field, next_id);
-            Type::List(ListType {
-                element_field: new_element,
-            })
-        }
-        Type::Map(map_type) => {
-            let new_key = assign_fresh_ids(&map_type.key_field, next_id);
-            let new_value = assign_fresh_ids(&map_type.value_field, next_id);
-            Type::Map(MapType {
-                key_field: new_key,
-                value_field: new_value,
-            })
-        }
     }
 }
 
@@ -333,7 +275,7 @@ impl TransactionAction for UpdateSchemaAction {
             };
 
             // Assign fresh IDs immediately, preserving insertion order.
-            let field = assign_fresh_ids(&pending_field, &mut last_column_id);
+            let field = assign_fresh_ids(&pending_field, &mut last_column_id)?;
 
             additions_by_parent
                 .entry(parent_id)

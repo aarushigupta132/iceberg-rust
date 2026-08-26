@@ -16,6 +16,7 @@
 // under the License.
 
 mod apply;
+mod fresh_ids;
 
 #[cfg(test)]
 mod tests;
