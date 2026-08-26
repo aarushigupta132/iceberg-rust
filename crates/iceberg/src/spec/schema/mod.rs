@@ -367,6 +367,12 @@ impl Schema {
             .and_then(|id| self.field_by_id(id))
     }
 
+    pub(crate) fn case_insensitive_name_collision(&self) -> Option<&str> {
+        self.lowercase_name_to_id
+            .iter()
+            .find_map(|(name, id)| id.is_none().then_some(name.as_str()))
+    }
+
     /// Get field by alias.
     pub fn field_by_alias(&self, alias: &str) -> Option<&NestedFieldRef> {
         self.alias_to_id

@@ -50,6 +50,7 @@ pub(super) struct PendingSchemaUpdate<'a> {
     id_to_parent: HashMap<i32, i32>,
     identifier_field_ids: HashSet<i32>,
     last_column_id: i32,
+    case_sensitive: bool,
 }
 
 impl<'a> PendingSchemaUpdate<'a> {
@@ -65,6 +66,7 @@ impl<'a> PendingSchemaUpdate<'a> {
             id_to_parent,
             identifier_field_ids: schema.identifier_field_ids().collect(),
             last_column_id,
+            case_sensitive: true,
         }
     }
 
@@ -74,6 +76,9 @@ impl<'a> PendingSchemaUpdate<'a> {
                 SchemaOperation::Add(add) => self.add_column(add)?,
                 SchemaOperation::Delete(name) => self.delete_column(name)?,
                 SchemaOperation::Rename { name, new_name } => self.rename_column(name, new_name)?,
+                SchemaOperation::SetCaseSensitive(case_sensitive) => {
+                    self.case_sensitive = *case_sensitive;
+                }
             }
         }
         Ok(())
@@ -89,11 +94,17 @@ impl<'a> PendingSchemaUpdate<'a> {
             &self.deletes,
             None,
         )?;
-        Schema::builder()
+        let schema = Schema::builder()
             .with_fields(fields)
             .with_identifier_field_ids(self.identifier_field_ids.iter().copied())
             .build()
-            .map_err(|error| precondition("Cannot apply schema update").with_source(error))
+            .map_err(|error| precondition("Cannot apply schema update").with_source(error))?;
+
+        if !self.case_sensitive {
+            validate_case_insensitive_names(&schema)?;
+        }
+
+        Ok(schema)
     }
 
     fn add_column(&mut self, add: &AddColumn) -> Result<()> {
@@ -127,7 +138,7 @@ impl<'a> PendingSchemaUpdate<'a> {
             (None, add.name.clone(), add.name.clone())
         };
 
-        if let Some(existing) = self.schema.field_by_name(&conflict_name)
+        if let Some(existing) = self.resolve_field(&conflict_name)?
             && !self.deletes.contains(&existing.id)
         {
             return Err(precondition(format!(
@@ -149,8 +160,7 @@ impl<'a> PendingSchemaUpdate<'a> {
 
     fn delete_column(&mut self, name: &str) -> Result<()> {
         let field = self
-            .schema
-            .field_by_name(name)
+            .resolve_field(name)?
             .ok_or_else(|| precondition(format!("Cannot delete missing column: {name}")))?;
 
         if self.additions.contains_key(&Some(field.id)) {
@@ -173,8 +183,7 @@ impl<'a> PendingSchemaUpdate<'a> {
             return Err(precondition("Invalid column name: (empty)"));
         }
         let field = self
-            .schema
-            .field_by_name(name)
+            .resolve_field(name)?
             .ok_or_else(|| precondition(format!("Cannot rename missing column: {name}")))?;
         if self.deletes.contains(&field.id) {
             return Err(precondition(format!(
@@ -196,8 +205,7 @@ impl<'a> PendingSchemaUpdate<'a> {
 
     fn resolve_parent(&self, parent: &str) -> Result<i32> {
         let parent_field = self
-            .schema
-            .field_by_name(parent)
+            .resolve_field(parent)?
             .ok_or_else(|| precondition(format!("Cannot find parent struct: {parent}")))?;
 
         let target = match parent_field.field_type.as_ref() {
@@ -219,6 +227,19 @@ impl<'a> PendingSchemaUpdate<'a> {
             )));
         }
         Ok(target.id)
+    }
+
+    fn resolve_field(&self, name: &str) -> Result<Option<&NestedFieldRef>> {
+        if name.is_empty() {
+            return Err(precondition("Invalid column name: (empty)"));
+        }
+
+        if self.case_sensitive {
+            Ok(self.schema.field_by_name(name))
+        } else {
+            validate_case_insensitive_names(self.schema)?;
+            Ok(self.schema.field_by_name_case_insensitive(name))
+        }
     }
 
     fn validate_identifier_deletions(&self) -> Result<()> {
@@ -272,4 +293,13 @@ impl<'a> PendingSchemaUpdate<'a> {
 
 fn precondition(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::PreconditionFailed, message)
+}
+
+fn validate_case_insensitive_names(schema: &Schema) -> Result<()> {
+    if let Some(name) = schema.case_insensitive_name_collision() {
+        return Err(precondition(format!(
+            "Cannot use case-insensitive schema updates because multiple fields match: {name}"
+        )));
+    }
+    Ok(())
 }

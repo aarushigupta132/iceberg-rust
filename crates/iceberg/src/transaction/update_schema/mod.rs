@@ -23,6 +23,9 @@ mod name_mapping;
 mod tree;
 
 #[cfg(test)]
+#[path = "tests/case_sensitive.rs"]
+mod case_sensitive_tests;
+#[cfg(test)]
 #[path = "tests/column_properties.rs"]
 mod column_properties_tests;
 #[cfg(test)]
@@ -123,6 +126,7 @@ enum SchemaOperation {
     Add(Box<AddColumn>),
     Delete(String),
     Rename { name: String, new_name: String },
+    SetCaseSensitive(bool),
 }
 
 impl UpdateSchemaAction {
@@ -165,6 +169,15 @@ impl UpdateSchemaAction {
             name: name.to_string(),
             new_name: new_name.to_string(),
         });
+        self
+    }
+
+    /// Configure whether subsequent operations resolve column names case-sensitively.
+    ///
+    /// Column-name resolution is case-sensitive by default.
+    pub fn case_sensitive(mut self, case_sensitive: bool) -> Self {
+        self.operations
+            .push(SchemaOperation::SetCaseSensitive(case_sensitive));
         self
     }
 }

@@ -3267,6 +3267,7 @@ pub fn iceberg::transaction::UpdatePropertiesAction::set(self, key: alloc::strin
 pub struct iceberg::transaction::UpdateSchemaAction
 impl iceberg::transaction::UpdateSchemaAction
 pub fn iceberg::transaction::UpdateSchemaAction::add_column(self, add_column: iceberg::transaction::AddColumn) -> Self
+pub fn iceberg::transaction::UpdateSchemaAction::case_sensitive(self, case_sensitive: bool) -> Self
 pub fn iceberg::transaction::UpdateSchemaAction::delete_column(self, name: impl alloc::string::ToString) -> Self
 pub fn iceberg::transaction::UpdateSchemaAction::rename_column(self, name: impl alloc::string::ToString, new_name: impl alloc::string::ToString) -> Self
 pub struct iceberg::transaction::UpdateStatisticsAction
