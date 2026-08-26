@@ -84,6 +84,7 @@ impl<'a> PendingSchemaUpdate<'a> {
                 SchemaOperation::UpdateType { name, new_type } => {
                     self.update_column_type(name, new_type)?
                 }
+                SchemaOperation::UpdateDoc { name, doc } => self.update_column_doc(name, doc)?,
                 SchemaOperation::SetCaseSensitive(case_sensitive) => {
                     self.case_sensitive = *case_sensitive;
                 }
@@ -255,6 +256,26 @@ impl<'a> PendingSchemaUpdate<'a> {
             old_primitive,
             &promoted_type,
         )?;
+        self.updates.insert(updated.id, Arc::new(updated));
+        Ok(())
+    }
+
+    fn update_column_doc(&mut self, name: &str, doc: &Option<String>) -> Result<()> {
+        let field = self
+            .find_for_update(name)?
+            .ok_or_else(|| precondition(format!("Cannot update missing column: {name}")))?;
+        if self.deletes.contains(&field.id) {
+            return Err(precondition(format!(
+                "Cannot update a column that will be deleted: {}",
+                field.name
+            )));
+        }
+        if field.doc.as_ref() == doc.as_ref() {
+            return Ok(());
+        }
+
+        let mut updated = (*field).clone();
+        updated.doc = doc.clone();
         self.updates.insert(updated.id, Arc::new(updated));
         Ok(())
     }

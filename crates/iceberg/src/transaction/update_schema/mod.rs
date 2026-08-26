@@ -30,6 +30,9 @@ mod case_sensitive_tests;
 #[path = "tests/column_properties.rs"]
 mod column_properties_tests;
 #[cfg(test)]
+#[path = "tests/docs.rs"]
+mod docs_tests;
+#[cfg(test)]
 #[path = "tests/name_mapping.rs"]
 mod name_mapping_tests;
 #[cfg(test)]
@@ -137,6 +140,10 @@ enum SchemaOperation {
         name: String,
         new_type: PrimitiveType,
     },
+    UpdateDoc {
+        name: String,
+        doc: Option<String>,
+    },
     SetCaseSensitive(bool),
 }
 
@@ -191,6 +198,15 @@ impl UpdateSchemaAction {
         self.operations.push(SchemaOperation::UpdateType {
             name: name.to_string(),
             new_type,
+        });
+        self
+    }
+
+    /// Set or clear a column's documentation while preserving its other metadata.
+    pub fn update_column_doc(mut self, name: impl ToString, doc: Option<String>) -> Self {
+        self.operations.push(SchemaOperation::UpdateDoc {
+            name: name.to_string(),
+            doc,
         });
         self
     }

@@ -3270,6 +3270,7 @@ pub fn iceberg::transaction::UpdateSchemaAction::add_column(self, add_column: ic
 pub fn iceberg::transaction::UpdateSchemaAction::case_sensitive(self, case_sensitive: bool) -> Self
 pub fn iceberg::transaction::UpdateSchemaAction::delete_column(self, name: impl alloc::string::ToString) -> Self
 pub fn iceberg::transaction::UpdateSchemaAction::rename_column(self, name: impl alloc::string::ToString, new_name: impl alloc::string::ToString) -> Self
+pub fn iceberg::transaction::UpdateSchemaAction::update_column_doc(self, name: impl alloc::string::ToString, doc: core::option::Option<alloc::string::String>) -> Self
 pub fn iceberg::transaction::UpdateSchemaAction::update_column_type(self, name: impl alloc::string::ToString, new_type: iceberg::spec::PrimitiveType) -> Self
 pub struct iceberg::transaction::UpdateStatisticsAction
 impl iceberg::transaction::UpdateStatisticsAction
