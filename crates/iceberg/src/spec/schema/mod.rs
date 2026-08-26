@@ -36,7 +36,7 @@ use self::_serde::SchemaEnum;
 use self::id_reassigner::ReassignFieldIds;
 use self::index::{IndexByName, index_by_id, index_parents};
 pub use self::prune_columns::prune_columns;
-use super::NestedField;
+use super::{Literal, NestedField};
 use crate::error::Result;
 use crate::expr::accessor::StructAccessor;
 use crate::spec::FormatVersion;
@@ -71,7 +71,7 @@ pub struct Schema {
     id_to_field: HashMap<i32, NestedFieldRef>,
 
     name_to_id: HashMap<String, i32>,
-    lowercase_name_to_id: HashMap<String, i32>,
+    lowercase_name_to_id: HashMap<String, Option<i32>>,
     id_to_name: HashMap<i32, String>,
 
     field_id_to_accessor: HashMap<i32, Arc<StructAccessor>>,
@@ -150,10 +150,18 @@ impl SchemaBuilder {
             index.indexes()
         };
 
-        let lowercase_name_to_id = name_to_id
-            .iter()
-            .map(|(k, v)| (k.to_lowercase(), *v))
-            .collect();
+        let mut lowercase_name_to_id: HashMap<String, Option<i32>> =
+            HashMap::with_capacity(name_to_id.len());
+        for (name, id) in &name_to_id {
+            lowercase_name_to_id
+                .entry(name.to_lowercase())
+                .and_modify(|existing| {
+                    if existing.is_some_and(|existing_id| existing_id != *id) {
+                        *existing = None;
+                    }
+                })
+                .or_insert(Some(*id));
+        }
 
         let highest_field_id = id_to_field.keys().max().cloned().unwrap_or(0);
 
@@ -354,7 +362,15 @@ impl Schema {
     pub fn field_by_name_case_insensitive(&self, field_name: &str) -> Option<&NestedFieldRef> {
         self.lowercase_name_to_id
             .get(&field_name.to_lowercase())
-            .and_then(|id| self.field_by_id(*id))
+            .copied()
+            .flatten()
+            .and_then(|id| self.field_by_id(id))
+    }
+
+    pub(crate) fn case_insensitive_name_collision(&self) -> Option<&str> {
+        self.lowercase_name_to_id
+            .iter()
+            .find_map(|(name, id)| id.is_none().then_some(name.as_str()))
     }
 
     /// Get field by alias.
@@ -405,8 +421,8 @@ impl Schema {
 
     /// Check if this schema is identical to another schema semantically - excluding schema id.
     pub(crate) fn is_same_schema(&self, other: &SchemaRef) -> bool {
-        self.as_struct().eq(other.as_struct())
-            && self.identifier_field_ids().eq(other.identifier_field_ids())
+        same_struct(self.as_struct(), other.as_struct())
+            && self.identifier_field_ids == other.identifier_field_ids
     }
 
     /// Change the schema id of this schema.
@@ -508,6 +524,48 @@ impl Schema {
             ErrorKind::DataInvalid,
             format!("Invalid schema for {format_version}:\n- {message}"),
         ))
+    }
+}
+
+fn same_struct(left: &StructType, right: &StructType) -> bool {
+    left.fields().len() == right.fields().len()
+        && left
+            .fields()
+            .iter()
+            .zip(right.fields())
+            .all(|(left, right)| same_field(left, right))
+}
+
+fn same_field(left: &NestedField, right: &NestedField) -> bool {
+    left.id == right.id
+        && left.name == right.name
+        && left.required == right.required
+        && left.doc == right.doc
+        && same_type(&left.field_type, &right.field_type)
+        && same_default(&left.initial_default, &right.initial_default)
+        && same_default(&left.write_default, &right.write_default)
+}
+
+fn same_type(left: &Type, right: &Type) -> bool {
+    match (left, right) {
+        (Type::Primitive(left), Type::Primitive(right)) => left == right,
+        (Type::Struct(left), Type::Struct(right)) => same_struct(left, right),
+        (Type::List(left), Type::List(right)) => {
+            same_field(&left.element_field, &right.element_field)
+        }
+        (Type::Map(left), Type::Map(right)) => {
+            same_field(&left.key_field, &right.key_field)
+                && same_field(&left.value_field, &right.value_field)
+        }
+        (Type::Variant(left), Type::Variant(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn same_default(left: &Option<Literal>, right: &Option<Literal>) -> bool {
+    match (left, right) {
+        (Some(Literal::Primitive(left)), Some(Literal::Primitive(right))) => left.same_value(right),
+        _ => left == right,
     }
 }
 
@@ -1336,6 +1394,30 @@ table {
 
         assert_eq!(schema, reassigned_schema);
         assert_eq!(schema.highest_field_id(), 0);
+    }
+
+    #[test]
+    fn test_same_schema_ignores_identifier_set_iteration_order() {
+        let fields = || {
+            (1..=8)
+                .map(|id| {
+                    NestedField::required(id, format!("id_{id}"), Primitive(PrimitiveType::Long))
+                        .into()
+                })
+                .collect::<Vec<_>>()
+        };
+        let left = Schema::builder()
+            .with_fields(fields())
+            .with_identifier_field_ids(1..=8)
+            .build()
+            .unwrap();
+        let right = Schema::builder()
+            .with_fields(fields())
+            .with_identifier_field_ids((1..=8).rev())
+            .build()
+            .unwrap();
+
+        assert!(left.is_same_schema(&std::sync::Arc::new(right)));
     }
 
     #[test]

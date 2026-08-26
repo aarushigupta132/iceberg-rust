@@ -23,6 +23,7 @@ use typed_builder::TypedBuilder;
 use crate::spec::{Literal, NestedField, NestedFieldRef, PrimitiveType, Schema, Type};
 
 mod apply;
+mod defaults;
 mod metadata;
 #[cfg(test)]
 mod tests;
@@ -35,6 +36,11 @@ const DEFAULT_FIELD_ID: i32 = 0;
 /// Use helper constructors such as [`AddColumn::optional`] and [`AddColumn::required`],
 /// optionally setting `parent` and `doc` through [`AddColumn::builder`], then pass the value to
 /// [`UpdateSchemaAction::add_column`].
+///
+/// Long-backed temporal defaults use the physical unit of the target type because [`Literal`]
+/// does not retain a separate source logical type. Decimal literals are also unscaled; use a
+/// string literal when the supplied scale must be validated against the target decimal type.
+/// String timestamptz defaults accept UTC offsets, but not bracketed region IDs.
 #[derive(TypedBuilder)]
 pub struct AddColumn {
     #[builder(default = None, setter(strip_option, into))]
@@ -114,9 +120,6 @@ impl AddColumn {
 /// ```
 pub struct UpdateSchemaAction {
     operations: Vec<SchemaOperation>,
-    allow_incompatible_changes: bool,
-    case_sensitive: bool,
-    identifier_field_names: Option<HashSet<String>>,
 }
 
 enum SchemaOperation {
@@ -146,6 +149,9 @@ enum SchemaOperation {
         name: String,
         position: MovePosition,
     },
+    SetCaseSensitive(bool),
+    AllowIncompatibleChanges,
+    SetIdentifierFields(HashSet<String>),
     UnionByName(Schema),
 }
 
@@ -160,9 +166,6 @@ impl UpdateSchemaAction {
     pub(crate) fn new() -> Self {
         Self {
             operations: Vec::new(),
-            allow_incompatible_changes: false,
-            case_sensitive: true,
-            identifier_field_names: None,
         }
     }
 
@@ -245,7 +248,10 @@ impl UpdateSchemaAction {
     /// Set or clear a column's write default.
     ///
     /// Updating a default does not change the initial default used for rows written before the
-    /// column was added.
+    /// column was added. Long-backed temporal literals are interpreted in the physical unit of
+    /// the target column. Decimal literals are interpreted using the target scale; use a string
+    /// literal to require an exact supplied scale. Bracketed region IDs are not supported in
+    /// string timestamptz defaults.
     pub fn update_column_default(mut self, name: impl ToString, default: Option<Literal>) -> Self {
         self.operations.push(SchemaOperation::UpdateDefault {
             name: name.to_string(),
@@ -294,20 +300,23 @@ impl UpdateSchemaAction {
         I: IntoIterator<Item = S>,
         S: ToString,
     {
-        self.identifier_field_names =
-            Some(names.into_iter().map(|name| name.to_string()).collect());
+        self.operations.push(SchemaOperation::SetIdentifierFields(
+            names.into_iter().map(|name| name.to_string()).collect(),
+        ));
         self
     }
 
-    /// Resolve column names without regard to case when `case_sensitive` is false.
+    /// Resolve column names without regard to case in subsequent operations when false.
     pub fn case_sensitive(mut self, case_sensitive: bool) -> Self {
-        self.case_sensitive = case_sensitive;
+        self.operations
+            .push(SchemaOperation::SetCaseSensitive(case_sensitive));
         self
     }
 
-    /// Permit schema changes that may be incompatible with older data files.
+    /// Permit subsequent schema changes that may be incompatible with older data files.
     pub fn allow_incompatible_changes(mut self) -> Self {
-        self.allow_incompatible_changes = true;
+        self.operations
+            .push(SchemaOperation::AllowIncompatibleChanges);
         self
     }
 }

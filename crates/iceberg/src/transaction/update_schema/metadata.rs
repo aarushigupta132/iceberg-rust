@@ -35,6 +35,12 @@ const COLUMN_PROPERTY_PREFIXES: [&str; 3] = [
     "write.parquet.stats-enabled.column.",
 ];
 
+#[derive(Clone, Copy)]
+enum MappingParent {
+    Root,
+    Field(Option<i32>),
+}
+
 fn update_name_mapping(table: &Table, pending: &PendingSchemaUpdate<'_>) -> Option<TableUpdate> {
     let raw_mapping = table
         .metadata()
@@ -50,8 +56,12 @@ fn update_name_mapping(table: &Table, pending: &PendingSchemaUpdate<'_>) -> Opti
             return None;
         }
     };
-    let fields = update_mapped_fields(mapping.fields(), None, pending);
-    let serialized = match serde_json::to_string(&NameMapping::new(fields)) {
+    let fields = update_mapped_fields(mapping.fields(), MappingParent::Root, pending);
+    let updated_mapping = NameMapping::new(fields);
+    if updated_mapping == mapping {
+        return None;
+    }
+    let serialized = match serde_json::to_string(&updated_mapping) {
         Ok(serialized) => serialized,
         Err(err) => {
             tracing::warn!(
@@ -123,14 +133,19 @@ fn update_column_properties(
 
 fn update_mapped_fields(
     fields: &[MappedField],
-    parent_id: Option<i32>,
+    parent: MappingParent,
     pending: &PendingSchemaUpdate<'_>,
 ) -> Vec<MappedField> {
     let mut updated: Vec<MappedField> = fields
         .iter()
         .map(|field| update_mapped_field(field, pending))
         .collect();
-    if let Some(added_ids) = pending.additions.get(&parent_id) {
+    let added_ids = match parent {
+        MappingParent::Root => pending.additions.get(&None),
+        MappingParent::Field(Some(parent_id)) => pending.additions.get(&Some(parent_id)),
+        MappingParent::Field(None) => None,
+    };
+    if let Some(added_ids) = added_ids {
         updated.extend(
             added_ids
                 .iter()
@@ -186,7 +201,11 @@ fn update_mapped_field(field: &MappedField, pending: &PendingSchemaUpdate<'_>) -
         .iter()
         .map(|child| (**child).clone())
         .collect();
-    let children = update_mapped_fields(&existing_children, field.field_id(), pending);
+    let children = update_mapped_fields(
+        &existing_children,
+        MappingParent::Field(field.field_id()),
+        pending,
+    );
     MappedField::new(field.field_id(), names, children)
 }
 
@@ -223,35 +242,42 @@ impl TransactionAction for UpdateSchemaAction {
     async fn commit(self: Arc<Self>, table: &Table) -> Result<ActionCommit> {
         let base_schema = table.metadata().current_schema();
         let last_column_id = table.metadata().last_column_id();
-        let mut pending = PendingSchemaUpdate::new(
-            base_schema,
-            last_column_id,
-            self.allow_incompatible_changes,
-            self.case_sensitive,
-            self.identifier_field_names.clone(),
-        );
+        let mut pending = PendingSchemaUpdate::new(base_schema, last_column_id);
         pending.apply_operations(&self.operations)?;
         let schema = pending.apply()?;
         let mapping_update = update_name_mapping(table, &pending);
         let column_property_updates = update_column_properties(table, &pending, &schema);
+        let schema_changed = !schema.is_same_schema(base_schema);
 
-        let mut updates = vec![
-            TableUpdate::AddSchema { schema },
-            TableUpdate::SetCurrentSchema { schema_id: -1 },
-        ];
+        if !schema_changed && mapping_update.is_none() && column_property_updates.is_empty() {
+            return Ok(ActionCommit::new(Vec::new(), Vec::new()));
+        }
+
+        let mut updates = Vec::new();
+        if schema_changed {
+            updates.extend([
+                TableUpdate::AddSchema { schema },
+                TableUpdate::SetCurrentSchema { schema_id: -1 },
+            ]);
+        }
         if let Some(mapping_update) = mapping_update {
             updates.push(mapping_update);
         }
         updates.extend(column_property_updates);
 
-        let requirements = vec![
-            TableRequirement::CurrentSchemaIdMatch {
-                current_schema_id: base_schema.schema_id(),
-            },
-            TableRequirement::LastAssignedFieldIdMatch {
-                last_assigned_field_id: last_column_id,
-            },
-        ];
+        let mut requirements = vec![TableRequirement::UuidMatch {
+            uuid: table.metadata().uuid(),
+        }];
+        if schema_changed {
+            requirements.extend([
+                TableRequirement::LastAssignedFieldIdMatch {
+                    last_assigned_field_id: last_column_id,
+                },
+                TableRequirement::CurrentSchemaIdMatch {
+                    current_schema_id: base_schema.schema_id(),
+                },
+            ]);
+        }
 
         Ok(ActionCommit::new(updates, requirements))
     }

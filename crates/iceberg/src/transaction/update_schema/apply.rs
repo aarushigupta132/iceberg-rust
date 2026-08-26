@@ -18,10 +18,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use super::defaults::{convert_default, defaults_equal};
 use super::{AddColumn, MovePosition, SchemaOperation};
 use crate::spec::{
-    ListType, Literal, MapType, NestedField, NestedFieldRef, PrimitiveLiteral, PrimitiveType,
-    SCHEMA_NAME_DELIMITER, Schema, StructType, Type,
+    ListType, Literal, MapType, NestedField, NestedFieldRef, PrimitiveType, Schema, StructType,
+    Type,
 };
 use crate::{Error, ErrorKind, Result};
 
@@ -36,52 +37,105 @@ use crate::{Error, ErrorKind, Result};
 /// IDs rather than reassigning an existing schema. `ReassignFieldIds` cannot be used
 /// directly here because it rejects duplicate old IDs (all new fields share placeholder
 /// ID `DEFAULT_FIELD_ID`).
-pub(super) fn assign_fresh_ids(field: &NestedField, next_id: &mut i32) -> NestedFieldRef {
-    *next_id += 1;
-    let new_id = *next_id;
-    let new_type = assign_fresh_ids_to_type(&field.field_type, next_id);
-
-    Arc::new(NestedField {
-        id: new_id,
-        name: field.name.clone(),
-        required: field.required,
-        field_type: Box::new(new_type),
-        doc: field.doc.clone(),
-        initial_default: field.initial_default.clone(),
-        write_default: field.write_default.clone(),
-    })
+pub(super) fn assign_fresh_ids(field: &NestedField, next_id: &mut i32) -> Result<NestedFieldRef> {
+    let new_id = take_next_id(next_id)?;
+    rebuild_fresh_field(field, new_id, next_id, &field.name)
 }
 
 /// Recursively assign fresh field IDs to all nested fields within a `Type`.
-fn assign_fresh_ids_to_type(field_type: &Type, next_id: &mut i32) -> Type {
+fn assign_fresh_ids_to_type(field_type: &Type, next_id: &mut i32, name: &str) -> Result<Type> {
     match field_type {
-        Type::Primitive(_) => field_type.clone(),
+        Type::Primitive(_) => Ok(field_type.clone()),
         // Variant carries no nested fields, so there is nothing to reassign
         // (matches id_reassigner.rs).
-        Type::Variant(v) => Type::Variant(*v),
+        Type::Variant(v) => Ok(Type::Variant(*v)),
         Type::Struct(struct_type) => {
-            let new_fields: Vec<NestedFieldRef> = struct_type
+            // Match Java's AssignFreshIds: reserve IDs for all fields at this level
+            // before descending into any child type.
+            let new_ids = struct_type
                 .fields()
                 .iter()
-                .map(|f| assign_fresh_ids(f, next_id))
-                .collect();
-            Type::Struct(StructType::new(new_fields))
+                .map(|_| take_next_id(next_id))
+                .collect::<Result<Vec<_>>>()?;
+            let new_fields = struct_type
+                .fields()
+                .iter()
+                .zip(new_ids)
+                .map(|(field, id)| {
+                    rebuild_fresh_field(field, id, next_id, &format!("{name}.{}", field.name))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(Type::Struct(StructType::new(new_fields)))
         }
         Type::List(list_type) => {
-            let new_element = assign_fresh_ids(&list_type.element_field, next_id);
-            Type::List(ListType {
-                element_field: new_element,
-            })
+            let element_id = take_next_id(next_id)?;
+            let element_type = assign_fresh_ids_to_type(
+                &list_type.element_field.field_type,
+                next_id,
+                &format!("{name}.element"),
+            )?;
+            Ok(Type::List(ListType {
+                element_field: NestedField::list_element(
+                    element_id,
+                    element_type,
+                    list_type.element_field.required,
+                )
+                .into(),
+            }))
         }
         Type::Map(map_type) => {
-            let new_key = assign_fresh_ids(&map_type.key_field, next_id);
-            let new_value = assign_fresh_ids(&map_type.value_field, next_id);
-            Type::Map(MapType {
-                key_field: new_key,
-                value_field: new_value,
-            })
+            // Key and value are siblings, so reserve both IDs before visiting their
+            // nested types. Collection pseudo-fields are rebuilt canonically.
+            let key_id = take_next_id(next_id)?;
+            let value_id = take_next_id(next_id)?;
+            let key_type = assign_fresh_ids_to_type(
+                &map_type.key_field.field_type,
+                next_id,
+                &format!("{name}.key"),
+            )?;
+            let value_type = assign_fresh_ids_to_type(
+                &map_type.value_field.field_type,
+                next_id,
+                &format!("{name}.value"),
+            )?;
+            Ok(Type::Map(MapType {
+                key_field: NestedField::map_key_element(key_id, key_type).into(),
+                value_field: NestedField::map_value_element(
+                    value_id,
+                    value_type,
+                    map_type.value_field.required,
+                )
+                .into(),
+            }))
         }
     }
+}
+
+fn rebuild_fresh_field(
+    field: &NestedField,
+    id: i32,
+    next_id: &mut i32,
+    name: &str,
+) -> Result<NestedFieldRef> {
+    let field_type = assign_fresh_ids_to_type(&field.field_type, next_id, name)?;
+    let initial_default = convert_default(&field_type, field.initial_default.as_ref(), name)?;
+    let write_default = convert_default(&field_type, field.write_default.as_ref(), name)?;
+    let mut rebuilt = NestedField::new(id, &field.name, field_type, field.required);
+    rebuilt.doc = field.doc.clone();
+    rebuilt.initial_default = initial_default;
+    rebuilt.write_default = write_default;
+    Ok(Arc::new(rebuilt))
+}
+
+fn take_next_id(last_id: &mut i32) -> Result<i32> {
+    let id = last_id.checked_add(1).ok_or_else(|| {
+        Error::new(
+            ErrorKind::DataInvalid,
+            "Field ID overflowed, cannot add more fields",
+        )
+    })?;
+    *last_id = id;
+    Ok(id)
 }
 
 // ---------------------------------------------------------------------------
@@ -161,19 +215,17 @@ pub(super) struct PendingSchemaUpdate<'a> {
     last_column_id: i32,
     allow_incompatible_changes: bool,
     case_sensitive: bool,
-    identifier_field_names: Option<HashSet<String>>,
+    identifier_field_names: HashSet<String>,
 }
 
 impl<'a> PendingSchemaUpdate<'a> {
-    pub(super) fn new(
-        schema: &'a Schema,
-        last_column_id: i32,
-        allow_incompatible_changes: bool,
-        case_sensitive: bool,
-        identifier_field_names: Option<HashSet<String>>,
-    ) -> Self {
+    pub(super) fn new(schema: &'a Schema, last_column_id: i32) -> Self {
         let mut id_to_parent = HashMap::new();
         index_parent_ids(schema.as_struct().fields(), None, &mut id_to_parent);
+        let identifier_field_names = schema
+            .identifier_field_ids()
+            .filter_map(|id| schema.name_by_field_id(id).map(str::to_string))
+            .collect();
 
         Self {
             schema,
@@ -184,14 +236,29 @@ impl<'a> PendingSchemaUpdate<'a> {
             id_to_parent,
             added_name_to_id: HashMap::new(),
             last_column_id,
-            allow_incompatible_changes,
-            case_sensitive,
+            allow_incompatible_changes: false,
+            case_sensitive: true,
             identifier_field_names,
         }
     }
 
     pub(super) fn apply_operations(&mut self, operations: &[SchemaOperation]) -> Result<()> {
         for operation in operations {
+            match operation {
+                SchemaOperation::SetCaseSensitive(case_sensitive) => {
+                    self.case_sensitive = *case_sensitive;
+                    continue;
+                }
+                SchemaOperation::AllowIncompatibleChanges => {
+                    self.allow_incompatible_changes = true;
+                    continue;
+                }
+                SchemaOperation::SetIdentifierFields(names) => {
+                    self.set_identifier_fields(names);
+                    continue;
+                }
+                _ => self.validate_case_insensitive_names()?,
+            }
             match operation {
                 SchemaOperation::Add(add) => self.add_column(add)?,
                 SchemaOperation::Delete(name) => self.delete_column(name)?,
@@ -208,6 +275,9 @@ impl<'a> PendingSchemaUpdate<'a> {
                 }
                 SchemaOperation::Move { name, position } => self.move_column(name, position)?,
                 SchemaOperation::UnionByName(new_schema) => self.union_by_name(new_schema)?,
+                SchemaOperation::SetCaseSensitive(_)
+                | SchemaOperation::AllowIncompatibleChanges
+                | SchemaOperation::SetIdentifierFields(_) => unreachable!(),
             }
         }
 
@@ -215,13 +285,6 @@ impl<'a> PendingSchemaUpdate<'a> {
     }
 
     fn add_column(&mut self, add: &AddColumn) -> Result<()> {
-        if add.parent.is_none() && add.name.contains(SCHEMA_NAME_DELIMITER) {
-            return Err(precondition(format!(
-                "Cannot add column with ambiguous name: {}. Set a parent to add a nested column",
-                add.name
-            )));
-        }
-
         let initial_default =
             convert_default(&add.field_type, add.initial_default.as_ref(), &add.name)?;
         let write_default =
@@ -270,7 +333,7 @@ impl<'a> PendingSchemaUpdate<'a> {
         let mut pending = (*add.to_nested_field()).clone();
         pending.initial_default = initial_default;
         pending.write_default = write_default;
-        let field = assign_fresh_ids(&pending, &mut self.last_column_id);
+        let field = assign_fresh_ids(&pending, &mut self.last_column_id)?;
         index_added_field(&field, parent_id, &mut self.id_to_parent);
         self.added_name_to_id
             .insert(self.normalized_name(&full_name), field.id);
@@ -309,17 +372,23 @@ impl<'a> PendingSchemaUpdate<'a> {
             )));
         }
 
+        let field_id = field.id;
         let current = self
             .updates
-            .get(&field.id)
+            .get(&field_id)
             .cloned()
             .unwrap_or_else(|| field.clone());
-        if current.name != new_name {
-            let mut updated = (*current).clone();
-            updated.name = new_name.to_string();
-            self.updates.insert(field.id, Arc::new(updated));
+        let mut updated = (*current).clone();
+        updated.name = new_name.to_string();
+        self.updates.insert(field_id, Arc::new(updated));
+        if self.identifier_field_names.remove(name) {
+            self.identifier_field_names.insert(new_name.to_string());
         }
         Ok(())
+    }
+
+    fn set_identifier_fields(&mut self, names: &HashSet<String>) {
+        self.identifier_field_names = names.clone();
     }
 
     fn set_required(&mut self, name: &str, required: bool) -> Result<()> {
@@ -400,7 +469,7 @@ impl<'a> PendingSchemaUpdate<'a> {
             )));
         }
         let default = convert_default(&field.field_type, default.as_ref(), name)?;
-        if field.write_default == default {
+        if default.is_some() && defaults_equal(&field.write_default, &default) {
             return Ok(());
         }
 
@@ -499,7 +568,7 @@ impl<'a> PendingSchemaUpdate<'a> {
                     initial_default: new_field.initial_default.clone(),
                     write_default: new_field.initial_default.clone(),
                 })?;
-                if new_field.write_default != new_field.initial_default {
+                if !defaults_equal(&new_field.write_default, &new_field.initial_default) {
                     self.update_default(&full_name, new_field.write_default.clone())?;
                 }
             }
@@ -529,15 +598,6 @@ impl<'a> PendingSchemaUpdate<'a> {
         if !new_field.required && existing_field.required {
             self.set_required(&name, false)?;
         }
-        if new_field.doc.is_some() && new_field.doc != existing_field.doc {
-            self.update_doc(&name, new_field.doc.clone())?;
-        }
-        if new_field.write_default.is_some()
-            && new_field.write_default != existing_field.write_default
-        {
-            self.update_default(&name, new_field.write_default.clone())?;
-        }
-
         match (
             existing_field.field_type.as_ref(),
             new_field.field_type.as_ref(),
@@ -559,25 +619,33 @@ impl<'a> PendingSchemaUpdate<'a> {
                 self.union_field(&existing.key_field, &new.key_field)?;
                 self.union_field(&existing.value_field, &new.value_field)?;
             }
+            (Type::Variant(_), Type::Variant(_)) => {}
+            (Type::Struct(_) | Type::List(_) | Type::Map(_), Type::Variant(_)) => {}
             (existing, new) => {
                 return Err(precondition(format!(
                     "Cannot merge column {name}: incompatible types {existing} and {new}"
                 )));
             }
         }
+        // Apply metadata after type reconciliation so incoming defaults are
+        // converted against the merged type, matching Java's UnionByNameVisitor.
+        if new_field.doc.is_some() && new_field.doc != existing_field.doc {
+            self.update_doc(&name, new_field.doc.clone())?;
+        }
+        if new_field.write_default.is_some()
+            && !defaults_equal(&new_field.write_default, &existing_field.write_default)
+        {
+            self.update_default(&name, new_field.write_default.clone())?;
+        }
         Ok(())
     }
 
     pub(super) fn apply(&self) -> Result<Schema> {
-        let protected_identifier_ids: HashSet<i32> = if self.identifier_field_names.is_some() {
-            HashSet::new()
-        } else {
-            self.schema.identifier_field_ids().collect()
-        };
-        for identifier_id in protected_identifier_ids {
-            let identifier = self.schema.field_by_id(identifier_id).ok_or_else(|| {
-                precondition(format!("Identifier field {identifier_id} does not exist"))
-            })?;
+        for name in &self.identifier_field_names {
+            let Some(identifier) = self.find_field(name) else {
+                continue;
+            };
+            let identifier_id = identifier.id;
             if self.deletes.contains(&identifier_id) {
                 return Err(precondition(format!(
                     "Cannot delete identifier field {}. To force deletion, also replace the identifier fields",
@@ -596,6 +664,44 @@ impl<'a> PendingSchemaUpdate<'a> {
             }
         }
 
+        let schema_without_identifiers = self.current_schema_without_identifiers()?;
+        if !self.case_sensitive
+            && let Some(name) = schema_without_identifiers.case_insensitive_name_collision()
+        {
+            return Err(precondition(format!(
+                "Cannot use case-insensitive schema updates because multiple fields match: {name}"
+            )));
+        }
+
+        let identifier_ids = self
+            .identifier_field_names
+            .iter()
+            .map(|name| {
+                let identifier = if self.case_sensitive || *name == name.to_lowercase() {
+                    self.find_in_schema(&schema_without_identifiers, name)
+                } else {
+                    None
+                };
+                identifier
+                    .map(|field| field.id)
+                    .ok_or_else(|| {
+                        precondition(format!(
+                            "Cannot add field {name} as an identifier field: not found in updated schema"
+                        ))
+                    })
+            })
+            .collect::<Result<HashSet<_>>>()?;
+
+        schema_without_identifiers
+            .into_builder()
+            .with_identifier_field_ids(identifier_ids)
+            .build()
+            .map_err(|err| {
+                precondition("Invalid identifier fields for updated schema").with_source(err)
+            })
+    }
+
+    fn current_schema_without_identifiers(&self) -> Result<Schema> {
         let fields = rebuild_fields(
             self.schema.as_struct().fields(),
             &self.updates,
@@ -604,35 +710,10 @@ impl<'a> PendingSchemaUpdate<'a> {
             &self.moves,
             None,
         )?;
-        let schema_without_identifiers = Schema::builder()
-            .with_fields(fields.clone())
-            .build()
-            .map_err(|err| precondition("Cannot apply schema update").with_source(err))?;
-
-        let identifier_ids = if let Some(names) = &self.identifier_field_names {
-            names
-                .iter()
-                .map(|name| {
-                    self.find_in_schema(&schema_without_identifiers, name)
-                        .map(|field| field.id)
-                        .ok_or_else(|| {
-                            precondition(format!(
-                                "Cannot add field {name} as an identifier field: not found in updated schema"
-                            ))
-                        })
-                })
-                .collect::<Result<HashSet<_>>>()?
-        } else {
-            self.schema.identifier_field_ids().collect()
-        };
-
         Schema::builder()
             .with_fields(fields)
-            .with_identifier_field_ids(identifier_ids)
             .build()
-            .map_err(|err| {
-                precondition("Invalid identifier fields for updated schema").with_source(err)
-            })
+            .map_err(|err| precondition("Cannot apply schema update").with_source(err))
     }
 
     fn find_field(&self, name: &str) -> Option<&NestedFieldRef> {
@@ -688,6 +769,17 @@ impl<'a> PendingSchemaUpdate<'a> {
             name.to_lowercase()
         }
     }
+
+    fn validate_case_insensitive_names(&self) -> Result<()> {
+        if !self.case_sensitive
+            && let Some(name) = self.schema.case_insensitive_name_collision()
+        {
+            return Err(precondition(format!(
+                "Cannot use case-insensitive schema updates because multiple fields match: {name}"
+            )));
+        }
+        Ok(())
+    }
 }
 
 fn precondition(message: impl Into<String>) -> Error {
@@ -700,46 +792,6 @@ fn names_equal(left: &str, right: &str, case_sensitive: bool) -> bool {
     } else {
         left.to_lowercase() == right.to_lowercase()
     }
-}
-
-fn convert_default(
-    field_type: &Type,
-    default: Option<&Literal>,
-    name: &str,
-) -> Result<Option<Literal>> {
-    let Some(default) = default else {
-        return Ok(None);
-    };
-    let converted = match (field_type, default) {
-        (Type::Primitive(field_type), Literal::Primitive(value))
-            if field_type.compatible(value) =>
-        {
-            default.clone()
-        }
-        (
-            Type::Primitive(PrimitiveType::Long),
-            Literal::Primitive(PrimitiveLiteral::Int(value)),
-        ) => Literal::long(*value),
-        (
-            Type::Primitive(PrimitiveType::Double),
-            Literal::Primitive(PrimitiveLiteral::Float(value)),
-        ) => Literal::double(value.0 as f64),
-        _ => {
-            return Err(precondition(format!(
-                "Invalid default for column {name}: default is incompatible with {field_type}"
-            )));
-        }
-    };
-    converted
-        .clone()
-        .try_into_json(field_type)
-        .map(|_| Some(converted))
-        .map_err(|err| {
-            precondition(format!(
-                "Invalid default for column {name}: default is incompatible with {field_type}"
-            ))
-            .with_source(err)
-        })
 }
 
 fn is_promotion_allowed(from: &Type, to: &PrimitiveType) -> bool {
@@ -891,6 +943,12 @@ fn rebuild_field(
                 )));
             }
             let new_element = rebuild_field(&l.element_field, updates, additions, deletes, moves)?;
+            let new_element = NestedField::list_element(
+                new_element.id,
+                new_element.field_type.as_ref().clone(),
+                new_element.required,
+            )
+            .into();
             Ok(Arc::new(NestedField {
                 id: pending.id,
                 name: pending.name.clone(),
@@ -920,6 +978,13 @@ fn rebuild_field(
                     field.name
                 )));
             }
+            let new_key = rebuild_field(&m.key_field, updates, additions, deletes, moves)?;
+            if new_key.as_ref() != m.key_field.as_ref() {
+                return Err(precondition(format!(
+                    "Cannot alter map keys: {}",
+                    field.name
+                )));
+            }
             if deletes.contains(&m.value_field.id) {
                 return Err(precondition(format!(
                     "Cannot delete value type from map: {}",
@@ -927,6 +992,12 @@ fn rebuild_field(
                 )));
             }
             let new_value = rebuild_field(&m.value_field, updates, additions, deletes, moves)?;
+            let new_value = NestedField::map_value_element(
+                new_value.id,
+                new_value.field_type.as_ref().clone(),
+                new_value.required,
+            )
+            .into();
             Ok(Arc::new(NestedField {
                 id: pending.id,
                 name: pending.name.clone(),
