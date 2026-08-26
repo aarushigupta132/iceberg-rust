@@ -18,6 +18,7 @@
 mod apply;
 mod column_properties;
 mod commit;
+mod defaults;
 mod fresh_ids;
 mod name_mapping;
 mod tree;
@@ -29,6 +30,9 @@ mod case_sensitive_tests;
 #[cfg(test)]
 #[path = "tests/column_properties.rs"]
 mod column_properties_tests;
+#[cfg(test)]
+#[path = "tests/defaults.rs"]
+mod defaults_tests;
 #[cfg(test)]
 #[path = "tests/docs.rs"]
 mod docs_tests;
@@ -56,6 +60,11 @@ use crate::spec::{Literal, PrimitiveType, Type};
 /// Use helper constructors such as [`AddColumn::optional`] and [`AddColumn::required`],
 /// optionally combined with the builder's `parent` and `doc` setters via
 /// [`AddColumn::builder`], then pass the value to [`UpdateSchemaAction::add_column`].
+///
+/// Rust literals share physical variants across logical types. An already compatible numeric
+/// default is interpreted in the target type's units: dates use epoch days, microsecond
+/// timestamps use epoch microseconds, and nanosecond timestamps use epoch nanoseconds. String
+/// defaults are parsed as their target logical type.
 #[derive(TypedBuilder)]
 pub struct AddColumn {
     #[builder(default = None, setter(strip_option, into))]

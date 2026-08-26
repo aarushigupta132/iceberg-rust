@@ -335,6 +335,10 @@ pub(crate) mod date {
 pub(crate) mod time {
     use super::*;
 
+    pub(crate) fn iso_time_to_microseconds(value: &str) -> Result<i64> {
+        Ok((parse_iso_time_nanos(value)? / 1_000) as i64)
+    }
+
     pub(crate) fn time_to_microseconds(time: &NaiveTime) -> i64 {
         time.signed_duration_since(
             // This is always the same and shouldn't fail
@@ -366,6 +370,16 @@ pub(crate) mod timestamp {
         nanos_to_microseconds(parse_iso_datetime_nanos(value)?)
     }
 
+    pub(crate) fn iso_datetime_to_nanoseconds(value: &str) -> Result<i64> {
+        i64::try_from(parse_iso_datetime_nanos(value)?).map_err(|error| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                "Timestamp is outside the representable nanosecond range",
+            )
+            .with_source(error)
+        })
+    }
+
     pub(crate) fn nanoseconds_to_datetime(nanos: i64) -> NaiveDateTime {
         DateTime::from_timestamp_nanos(nanos).naive_utc()
     }
@@ -394,6 +408,22 @@ pub(crate) mod timestamptz {
             return Err(invalid_iso_value("UTC timestamptz"));
         }
         nanos_to_microseconds(nanos)
+    }
+
+    pub(crate) fn iso_offset_datetime_to_microseconds(value: &str) -> Result<i64> {
+        let (nanos, _) = parse_iso_offset_datetime_nanos(value)?;
+        nanos_to_microseconds(nanos)
+    }
+
+    pub(crate) fn iso_offset_datetime_to_nanoseconds(value: &str) -> Result<i64> {
+        let (nanos, _) = parse_iso_offset_datetime_nanos(value)?;
+        i64::try_from(nanos).map_err(|error| {
+            Error::new(
+                ErrorKind::DataInvalid,
+                "Timestamptz is outside the representable nanosecond range",
+            )
+            .with_source(error)
+        })
     }
 
     pub(crate) fn nanoseconds_to_datetimetz(nanos: i64) -> DateTime<Utc> {

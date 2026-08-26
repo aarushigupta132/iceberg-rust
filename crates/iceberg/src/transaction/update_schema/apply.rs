@@ -18,6 +18,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use super::defaults::coerce_field_defaults;
 use super::fresh_ids::assign_fresh_ids;
 use super::tree::{index_parent_ids, rebuild_fields};
 use super::type_promotion::{is_promotion_allowed, promote_default, validated_primitive_type};
@@ -162,6 +163,7 @@ impl<'a> PendingSchemaUpdate<'a> {
         }
 
         let field = assign_fresh_ids(&add.to_nested_field(), &mut self.last_column_id)?;
+        let field = coerce_field_defaults(&field, &full_name)?;
         self.added_name_to_id
             .insert(self.case_sensitivity_aware_name(&full_name), field.id);
         self.additions.entry(parent_id).or_default().push(field.id);
