@@ -18,13 +18,13 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::defaults::coerce_field_defaults;
+use super::defaults::{coerce_default, coerce_field_defaults, defaults_equal};
 use super::fresh_ids::assign_fresh_ids;
 use super::tree::{index_parent_ids, rebuild_fields};
 use super::type_promotion::{is_promotion_allowed, promote_default, validated_primitive_type};
 use super::{AddColumn, SchemaOperation};
 use crate::spec::{
-    NestedField, NestedFieldRef, PrimitiveType, SCHEMA_NAME_DELIMITER, Schema, Type,
+    Literal, NestedField, NestedFieldRef, PrimitiveType, SCHEMA_NAME_DELIMITER, Schema, Type,
 };
 use crate::{Error, ErrorKind, Result};
 
@@ -86,6 +86,9 @@ impl<'a> PendingSchemaUpdate<'a> {
                     self.update_column_type(name, new_type)?
                 }
                 SchemaOperation::UpdateDoc { name, doc } => self.update_column_doc(name, doc)?,
+                SchemaOperation::UpdateDefault { name, default } => {
+                    self.update_column_default(name, default.as_ref())?
+                }
                 SchemaOperation::SetCaseSensitive(case_sensitive) => {
                     self.case_sensitive = *case_sensitive;
                 }
@@ -278,6 +281,28 @@ impl<'a> PendingSchemaUpdate<'a> {
 
         let mut updated = (*field).clone();
         updated.doc = doc.clone();
+        self.updates.insert(updated.id, Arc::new(updated));
+        Ok(())
+    }
+
+    fn update_column_default(&mut self, name: &str, default: Option<&Literal>) -> Result<()> {
+        let field = self
+            .find_for_update(name)?
+            .ok_or_else(|| precondition(format!("Cannot update missing column: {name}")))?;
+        if self.deletes.contains(&field.id) {
+            return Err(precondition(format!(
+                "Cannot update a column that will be deleted: {}",
+                field.name
+            )));
+        }
+
+        let default = coerce_default(&field.field_type, default, name)?;
+        if default.is_some() && defaults_equal(&field.write_default, &default) {
+            return Ok(());
+        }
+
+        let mut updated = (*field).clone();
+        updated.write_default = default;
         self.updates.insert(updated.id, Arc::new(updated));
         Ok(())
     }

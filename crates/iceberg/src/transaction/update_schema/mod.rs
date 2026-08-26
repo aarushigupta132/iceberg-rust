@@ -50,6 +50,9 @@ mod tests;
 #[cfg(test)]
 #[path = "tests/type_promotion.rs"]
 mod type_promotion_tests;
+#[cfg(test)]
+#[path = "tests/write_defaults.rs"]
+mod write_default_tests;
 
 use typed_builder::TypedBuilder;
 
@@ -153,6 +156,10 @@ enum SchemaOperation {
         name: String,
         doc: Option<String>,
     },
+    UpdateDefault {
+        name: String,
+        default: Option<Literal>,
+    },
     SetCaseSensitive(bool),
 }
 
@@ -216,6 +223,19 @@ impl UpdateSchemaAction {
         self.operations.push(SchemaOperation::UpdateDoc {
             name: name.to_string(),
             doc,
+        });
+        self
+    }
+
+    /// Set or clear a column's write default while preserving its initial default.
+    ///
+    /// Changing the write default affects newly written rows only; it does not alter existing
+    /// rows. Long-backed temporal literals use the physical unit of the target column. Decimal
+    /// literals use the target scale, while string literals must supply that scale exactly.
+    pub fn update_column_default(mut self, name: impl ToString, default: Option<Literal>) -> Self {
+        self.operations.push(SchemaOperation::UpdateDefault {
+            name: name.to_string(),
+            default,
         });
         self
     }

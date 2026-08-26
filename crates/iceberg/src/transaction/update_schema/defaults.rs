@@ -91,7 +91,14 @@ fn rebuild_collection_field(field: &NestedField, field_type: Type) -> NestedFiel
     Arc::new(rebuilt)
 }
 
-fn coerce_default(
+pub(super) fn defaults_equal(left: &Option<Literal>, right: &Option<Literal>) -> bool {
+    match (left, right) {
+        (Some(Literal::Primitive(left)), Some(Literal::Primitive(right))) => left.same_value(right),
+        _ => left == right,
+    }
+}
+
+pub(super) fn coerce_default(
     field_type: &Type,
     default: Option<&Literal>,
     full_name: &str,
