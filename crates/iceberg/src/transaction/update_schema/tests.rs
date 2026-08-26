@@ -54,7 +54,7 @@ use crate::{ErrorKind, TableIdent, TableRequirement, TableUpdate};
 ///       key(12, req, string)
 ///       value(13, req, struct)
 ///         data(14, opt, string)
-fn make_v2_table_with_nested() -> Table {
+pub(super) fn make_v2_table_with_nested() -> Table {
     let json = r#"{
         "format-version": 2,
         "table-uuid": "9c12d441-03fe-4693-9a96-a0705ddf69c2",
@@ -176,11 +176,17 @@ async fn test_add_column() {
 
     assert_eq!(updates[1], TableUpdate::SetCurrentSchema { schema_id: -1 });
 
-    // Verify requirement.
-    assert_eq!(requirements.len(), 1);
-    assert_eq!(requirements[0], TableRequirement::CurrentSchemaIdMatch {
-        current_schema_id: table.metadata().current_schema().schema_id()
-    });
+    assert_eq!(requirements, vec![
+        TableRequirement::UuidMatch {
+            uuid: table.metadata().uuid(),
+        },
+        TableRequirement::LastAssignedFieldIdMatch {
+            last_assigned_field_id: table.metadata().last_column_id(),
+        },
+        TableRequirement::CurrentSchemaIdMatch {
+            current_schema_id: table.metadata().current_schema().schema_id(),
+        },
+    ]);
 }
 
 #[tokio::test]
@@ -568,7 +574,7 @@ async fn test_add_column_to_primitive_parent_fails() {
     };
     assert_eq!(err.kind(), ErrorKind::PreconditionFailed);
     assert!(
-        err.message().contains("not a struct"),
+        err.message().contains("non-struct"),
         "error should mention type mismatch, got: {}",
         err.message()
     );

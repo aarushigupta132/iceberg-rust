@@ -16,8 +16,13 @@
 // under the License.
 
 mod apply;
+mod commit;
 mod fresh_ids;
+mod tree;
 
+#[cfg(test)]
+#[path = "tests/ordered.rs"]
+mod ordered_tests;
 #[cfg(test)]
 mod tests;
 
@@ -49,6 +54,10 @@ pub struct AddColumn {
 
 impl AddColumn {
     /// Create a root-level optional column specification.
+    ///
+    /// Empty root-level names are invalid, and names containing `.` are rejected as ambiguous.
+    /// Use the builder's `parent` setter to add a nested field, including a nested field whose
+    /// leaf name contains `.`.
     pub fn optional(name: impl ToString, field_type: Type) -> Self {
         Self::builder()
             .name(name.to_string())
@@ -58,6 +67,10 @@ impl AddColumn {
     }
 
     /// Create a root-level required column specification.
+    ///
+    /// Empty root-level names are invalid, and names containing `.` are rejected as ambiguous.
+    /// Use the builder's `parent` setter to add a nested field, including a nested field whose
+    /// leaf name contains `.`.
     pub fn required(name: impl ToString, field_type: Type, initial_default: Literal) -> Self {
         Self::builder()
             .name(name.to_string())
@@ -69,13 +82,10 @@ impl AddColumn {
     }
 }
 
-/// Schema evolution API modeled after the Java `SchemaUpdate` implementation.
+/// Schema evolution API modeled after Apache Iceberg Java's `SchemaUpdate` implementation.
 ///
-/// This action accumulates schema modifications (column additions and deletions)
-/// via builder methods. At commit time, it validates all operations against the
-/// current table schema, auto-assigns field IDs from `table.metadata().last_column_id()`,
-/// builds a new schema, and emits `AddSchema` + `SetCurrentSchema` updates with a
-/// `CurrentSchemaIdMatch` requirement.
+/// Operations are replayed against the latest table metadata on every transaction commit attempt.
+/// This keeps validation and field-ID assignment correct after a concurrent commit.
 ///
 /// # Example
 ///
@@ -84,24 +94,30 @@ impl AddColumn {
 /// let action = tx.update_schema()
 ///     .add_column(AddColumn::optional("new_col", Type::Primitive(PrimitiveType::Int)))
 ///     .add_column(
-///         AddColumn::optional("email", Type::Primitive(PrimitiveType::String))
-///             .with_parent("person")
+///         AddColumn::builder()
+///             .parent("person")
+///             .name("email")
+///             .field_type(Type::Primitive(PrimitiveType::String))
+///             .build()
 ///     )
 ///     .delete_column("old_col");
 /// let tx = action.apply(tx).unwrap();
 /// let table = tx.commit(&catalog).await.unwrap();
 /// ```
 pub struct UpdateSchemaAction {
-    additions: Vec<AddColumn>,
-    deletes: Vec<String>,
+    operations: Vec<SchemaOperation>,
+}
+
+enum SchemaOperation {
+    Add(Box<AddColumn>),
+    Delete(String),
 }
 
 impl UpdateSchemaAction {
     /// Creates a new empty `UpdateSchemaAction`.
     pub(crate) fn new() -> Self {
         Self {
-            additions: Vec::new(),
-            deletes: Vec::new(),
+            operations: Vec::new(),
         }
     }
 
@@ -113,7 +129,8 @@ impl UpdateSchemaAction {
     /// For nested additions, set a parent path.
     /// If the parent resolves to a map/list, the column is added to map value/list element.
     pub fn add_column(mut self, add_column: AddColumn) -> Self {
-        self.additions.push(add_column);
+        self.operations
+            .push(SchemaOperation::Add(Box::new(add_column)));
         self
     }
 
@@ -123,7 +140,8 @@ impl UpdateSchemaAction {
     ///
     /// At commit time, the column must exist in the current schema.
     pub fn delete_column(mut self, name: impl ToString) -> Self {
-        self.deletes.push(name.to_string());
+        self.operations
+            .push(SchemaOperation::Delete(name.to_string()));
         self
     }
 }
