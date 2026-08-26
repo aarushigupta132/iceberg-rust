@@ -22,6 +22,8 @@ use async_trait::async_trait;
 use super::UpdateSchemaAction;
 use super::apply::PendingSchemaUpdate;
 use super::column_properties::deleted_column_property_keys;
+use super::name_mapping::update_name_mapping_json;
+use crate::spec::DEFAULT_SCHEMA_NAME_MAPPING;
 use crate::table::Table;
 use crate::transaction::action::{ActionCommit, TransactionAction};
 use crate::{Result, TableRequirement, TableUpdate};
@@ -52,6 +54,27 @@ impl TransactionAction for UpdateSchemaAction {
             updates.push(TableUpdate::RemoveProperties {
                 removals: property_removals,
             });
+        }
+        if let Some(raw_mapping) = table
+            .metadata()
+            .properties()
+            .get(DEFAULT_SCHEMA_NAME_MAPPING)
+        {
+            match update_name_mapping_json(raw_mapping, pending.updates(), pending.additions()) {
+                Ok(Some(updated_mapping)) => {
+                    updates.push(TableUpdate::SetProperties {
+                        updates: [(DEFAULT_SCHEMA_NAME_MAPPING.to_string(), updated_mapping)]
+                            .into(),
+                    });
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "Failed to update external schema name mapping"
+                    );
+                }
+            }
         }
 
         Ok(ActionCommit::new(updates, vec![

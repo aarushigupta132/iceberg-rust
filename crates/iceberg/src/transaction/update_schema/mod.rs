@@ -19,11 +19,15 @@ mod apply;
 mod column_properties;
 mod commit;
 mod fresh_ids;
+mod name_mapping;
 mod tree;
 
 #[cfg(test)]
 #[path = "tests/column_properties.rs"]
 mod column_properties_tests;
+#[cfg(test)]
+#[path = "tests/name_mapping.rs"]
+mod name_mapping_tests;
 #[cfg(test)]
 #[path = "tests/ordered.rs"]
 mod ordered_tests;

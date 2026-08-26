@@ -228,6 +228,14 @@ impl<'a> PendingSchemaUpdate<'a> {
     pub(super) fn deletes(&self) -> &HashSet<i32> {
         &self.deletes
     }
+
+    pub(super) fn updates(&self) -> &HashMap<i32, NestedFieldRef> {
+        &self.updates
+    }
+
+    pub(super) fn additions(&self) -> &HashMap<Option<i32>, Vec<i32>> {
+        &self.additions
+    }
 }
 
 fn precondition(message: impl Into<String>) -> Error {
