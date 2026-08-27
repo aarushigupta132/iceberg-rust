@@ -259,22 +259,10 @@ impl<'a> PendingSchemaUpdate<'a> {
     }
 
     fn add_column(&mut self, add: &AddColumn) -> Result<()> {
-        self.add_column_internal(add, false)
-    }
-
-    pub(super) fn add_union_column(&mut self, add: &AddColumn) -> Result<()> {
-        self.add_column_internal(add, true)
-    }
-
-    fn add_column_internal(
-        &mut self,
-        add: &AddColumn,
-        allow_ambiguous_root_name: bool,
-    ) -> Result<()> {
         if add.parent.is_none() && add.name.is_empty() {
             return Err(precondition("Invalid column name: (empty)"));
         }
-        if !allow_ambiguous_root_name
+        if !add.literal_root_name
             && add.parent.is_none()
             && add.name.contains(SCHEMA_NAME_DELIMITER)
         {
@@ -331,6 +319,10 @@ impl<'a> PendingSchemaUpdate<'a> {
         self.additions.entry(parent_id).or_default().push(field.id);
         self.updates.insert(field.id, field);
         Ok(())
+    }
+
+    pub(super) fn add_union_column(&mut self, add: &AddColumn) -> Result<()> {
+        self.add_column(add)
     }
 
     fn delete_column(&mut self, name: &str) -> Result<()> {

@@ -42,6 +42,9 @@ mod docs_tests;
 #[path = "tests/identifier_fields.rs"]
 mod identifier_field_tests;
 #[cfg(test)]
+#[path = "tests/literal_root_names.rs"]
+mod literal_root_name_tests;
+#[cfg(test)]
 #[path = "tests/moves.rs"]
 mod move_tests;
 #[cfg(test)]
@@ -100,6 +103,8 @@ pub struct AddColumn {
     initial_default: Option<Literal>,
     #[builder(default = None, setter(strip_option))]
     write_default: Option<Literal>,
+    #[builder(default = false, setter(skip))]
+    literal_root_name: bool,
 }
 
 impl AddColumn {
@@ -107,7 +112,8 @@ impl AddColumn {
     ///
     /// Empty root-level names are invalid, and names containing `.` are rejected as ambiguous.
     /// Use the builder's `parent` setter to add a nested field, including a nested field whose
-    /// leaf name contains `.`.
+    /// leaf name contains `.`, or [`with_literal_root_name`](Self::with_literal_root_name) for a
+    /// literal dotted top-level name.
     pub fn optional(name: impl ToString, field_type: Type) -> Self {
         Self::builder()
             .name(name.to_string())
@@ -120,7 +126,8 @@ impl AddColumn {
     ///
     /// Empty root-level names are invalid, and names containing `.` are rejected as ambiguous.
     /// Use the builder's `parent` setter to add a nested field, including a nested field whose
-    /// leaf name contains `.`.
+    /// leaf name contains `.`, or [`with_literal_root_name`](Self::with_literal_root_name) for a
+    /// literal dotted top-level name.
     pub fn required(name: impl ToString, field_type: Type, initial_default: Literal) -> Self {
         Self::builder()
             .name(name.to_string())
@@ -129,6 +136,15 @@ impl AddColumn {
             .initial_default(initial_default.clone())
             .write_default(initial_default)
             .build()
+    }
+
+    /// Treat this column's name as a literal top-level name.
+    ///
+    /// This permits `.` in a root name, equivalent to Java's explicit `parent = null` overload.
+    /// Nested leaf names are already treated literally.
+    pub fn with_literal_root_name(mut self) -> Self {
+        self.literal_root_name = true;
+        self
     }
 }
 

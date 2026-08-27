@@ -3226,6 +3226,7 @@ pub struct iceberg::transaction::AddColumn
 impl iceberg::transaction::AddColumn
 pub fn iceberg::transaction::AddColumn::optional(name: impl alloc::string::ToString, field_type: iceberg::spec::Type) -> Self
 pub fn iceberg::transaction::AddColumn::required(name: impl alloc::string::ToString, field_type: iceberg::spec::Type, initial_default: iceberg::spec::Literal) -> Self
+pub fn iceberg::transaction::AddColumn::with_literal_root_name(self) -> Self
 impl iceberg::transaction::AddColumn
 pub fn iceberg::transaction::AddColumn::builder() -> AddColumnBuilder<((), (), (), (), (), (), ())>
 pub struct iceberg::transaction::ExpireSnapshotsAction

@@ -81,6 +81,7 @@ fn add_field(
         doc: new_field.doc.clone(),
         initial_default: new_field.initial_default.clone(),
         write_default: new_field.write_default.clone(),
+        literal_root_name: true,
     })
 }
 
