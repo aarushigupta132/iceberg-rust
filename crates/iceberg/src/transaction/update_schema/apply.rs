@@ -56,6 +56,7 @@ pub(super) struct PendingSchemaUpdate<'a> {
     identifier_field_ids: HashSet<i32>,
     last_column_id: i32,
     case_sensitive: bool,
+    allow_incompatible_changes: bool,
 }
 
 impl<'a> PendingSchemaUpdate<'a> {
@@ -73,6 +74,7 @@ impl<'a> PendingSchemaUpdate<'a> {
             identifier_field_ids: schema.identifier_field_ids().collect(),
             last_column_id,
             case_sensitive: true,
+            allow_incompatible_changes: false,
         }
     }
 
@@ -82,6 +84,9 @@ impl<'a> PendingSchemaUpdate<'a> {
                 SchemaOperation::Add(add) => self.add_column(add)?,
                 SchemaOperation::Delete(name) => self.delete_column(name)?,
                 SchemaOperation::Rename { name, new_name } => self.rename_column(name, new_name)?,
+                SchemaOperation::SetRequired { name, required } => {
+                    self.set_required(name, *required)?
+                }
                 SchemaOperation::UpdateType { name, new_type } => {
                     self.update_column_type(name, new_type)?
                 }
@@ -91,6 +96,9 @@ impl<'a> PendingSchemaUpdate<'a> {
                 }
                 SchemaOperation::SetCaseSensitive(case_sensitive) => {
                     self.case_sensitive = *case_sensitive;
+                }
+                SchemaOperation::AllowIncompatibleChanges => {
+                    self.allow_incompatible_changes = true;
                 }
             }
         }
@@ -159,7 +167,7 @@ impl<'a> PendingSchemaUpdate<'a> {
             )));
         }
 
-        if add.required && add.initial_default.is_none() {
+        if add.required && add.initial_default.is_none() && !self.allow_incompatible_changes {
             return Err(precondition(format!(
                 "Incompatible change: cannot add required column without an initial default: {full_name}"
             )));
@@ -215,6 +223,37 @@ impl<'a> PendingSchemaUpdate<'a> {
             .unwrap_or_else(|| field.clone());
         let mut updated = (*current).clone();
         updated.name = new_name.to_string();
+        self.updates.insert(updated.id, Arc::new(updated));
+        Ok(())
+    }
+
+    fn set_required(&mut self, name: &str, required: bool) -> Result<()> {
+        let field = self
+            .find_for_update(name)?
+            .ok_or_else(|| precondition(format!("Cannot update missing column: {name}")))?;
+        if field.required == required {
+            return Ok(());
+        }
+
+        let is_defaulted_add = self
+            .added_name_to_id
+            .values()
+            .any(|field_id| *field_id == field.id)
+            && field.initial_default.is_some();
+        if required && !is_defaulted_add && !self.allow_incompatible_changes {
+            return Err(precondition(format!(
+                "Cannot change column nullability: {name}: optional -> required"
+            )));
+        }
+        if self.deletes.contains(&field.id) {
+            return Err(precondition(format!(
+                "Cannot update a column that will be deleted: {}",
+                field.name
+            )));
+        }
+
+        let mut updated = (*field).clone();
+        updated.required = required;
         self.updates.insert(updated.id, Arc::new(updated));
         Ok(())
     }

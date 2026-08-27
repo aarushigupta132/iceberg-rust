@@ -40,6 +40,9 @@ mod docs_tests;
 #[path = "tests/name_mapping.rs"]
 mod name_mapping_tests;
 #[cfg(test)]
+#[path = "tests/nullability.rs"]
+mod nullability_tests;
+#[cfg(test)]
 #[path = "tests/ordered.rs"]
 mod ordered_tests;
 #[cfg(test)]
@@ -148,6 +151,10 @@ enum SchemaOperation {
         name: String,
         new_name: String,
     },
+    SetRequired {
+        name: String,
+        required: bool,
+    },
     UpdateType {
         name: String,
         new_type: PrimitiveType,
@@ -161,6 +168,7 @@ enum SchemaOperation {
         default: Option<Literal>,
     },
     SetCaseSensitive(bool),
+    AllowIncompatibleChanges,
 }
 
 impl UpdateSchemaAction {
@@ -169,6 +177,16 @@ impl UpdateSchemaAction {
         Self {
             operations: Vec::new(),
         }
+    }
+
+    /// Allow subsequent incompatible schema changes.
+    ///
+    /// This permits required columns without an initial default and optional columns to be made
+    /// required. The caller is responsible for ensuring existing data is compatible.
+    pub fn allow_incompatible_changes(mut self) -> Self {
+        self.operations
+            .push(SchemaOperation::AllowIncompatibleChanges);
+        self
     }
 
     // --- Root-level additions ---
@@ -202,6 +220,27 @@ impl UpdateSchemaAction {
         self.operations.push(SchemaOperation::Rename {
             name: name.to_string(),
             new_name: new_name.to_string(),
+        });
+        self
+    }
+
+    /// Change an optional column to required.
+    ///
+    /// This is rejected unless the column was added in this action with an initial default or
+    /// [`allow_incompatible_changes`](Self::allow_incompatible_changes) was called first.
+    pub fn require_column(mut self, name: impl ToString) -> Self {
+        self.operations.push(SchemaOperation::SetRequired {
+            name: name.to_string(),
+            required: true,
+        });
+        self
+    }
+
+    /// Change a required column to optional.
+    pub fn make_column_optional(mut self, name: impl ToString) -> Self {
+        self.operations.push(SchemaOperation::SetRequired {
+            name: name.to_string(),
+            required: false,
         });
         self
     }
