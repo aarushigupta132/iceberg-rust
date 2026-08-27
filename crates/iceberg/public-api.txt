@@ -3277,6 +3277,7 @@ pub fn iceberg::transaction::UpdateSchemaAction::move_column_first(self, name: i
 pub fn iceberg::transaction::UpdateSchemaAction::rename_column(self, name: impl alloc::string::ToString, new_name: impl alloc::string::ToString) -> Self
 pub fn iceberg::transaction::UpdateSchemaAction::require_column(self, name: impl alloc::string::ToString) -> Self
 pub fn iceberg::transaction::UpdateSchemaAction::set_identifier_fields<I, S>(self, names: I) -> Self where I: core::iter::traits::collect::IntoIterator<Item = S>, S: alloc::string::ToString
+pub fn iceberg::transaction::UpdateSchemaAction::union_by_name(self, new_schema: iceberg::spec::Schema) -> Self
 pub fn iceberg::transaction::UpdateSchemaAction::update_column_default(self, name: impl alloc::string::ToString, default: core::option::Option<iceberg::spec::Literal>) -> Self
 pub fn iceberg::transaction::UpdateSchemaAction::update_column_doc(self, name: impl alloc::string::ToString, doc: core::option::Option<alloc::string::String>) -> Self
 pub fn iceberg::transaction::UpdateSchemaAction::update_column_type(self, name: impl alloc::string::ToString, new_type: iceberg::spec::PrimitiveType) -> Self

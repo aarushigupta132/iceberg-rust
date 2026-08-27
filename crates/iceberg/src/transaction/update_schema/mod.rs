@@ -24,6 +24,7 @@ mod moves;
 mod name_mapping;
 mod tree;
 mod type_promotion;
+mod union;
 
 #[cfg(test)]
 #[path = "tests/case_sensitive.rs"]
@@ -61,6 +62,9 @@ mod tests;
 #[path = "tests/type_promotion.rs"]
 mod type_promotion_tests;
 #[cfg(test)]
+#[path = "tests/union_by_name.rs"]
+mod union_by_name_tests;
+#[cfg(test)]
 #[path = "tests/write_defaults.rs"]
 mod write_default_tests;
 
@@ -69,7 +73,7 @@ use std::collections::HashSet;
 use typed_builder::TypedBuilder;
 
 use self::moves::MovePosition;
-use crate::spec::{Literal, PrimitiveType, Type};
+use crate::spec::{Literal, PrimitiveType, Schema, Type};
 
 /// Declarative specification for adding a column in an [`UpdateSchemaAction`].
 ///
@@ -182,6 +186,7 @@ enum SchemaOperation {
         position: MovePosition,
     },
     SetIdentifierFields(HashSet<String>),
+    UnionByName(Box<Schema>),
     SetCaseSensitive(bool),
     AllowIncompatibleChanges,
 }
@@ -333,6 +338,18 @@ impl UpdateSchemaAction {
         self.operations.push(SchemaOperation::SetIdentifierFields(
             names.into_iter().map(|name| name.to_string()).collect(),
         ));
+        self
+    }
+
+    /// Reconcile fields from `new_schema` into the table schema by name.
+    ///
+    /// Missing fields are appended with fresh IDs and are optional at the missing-field boundary.
+    /// Existing fields may become optional, use a wider compatible primitive type, and adopt
+    /// non-null documentation or write defaults from `new_schema`. Incoming identifier fields are
+    /// ignored.
+    pub fn union_by_name(mut self, new_schema: Schema) -> Self {
+        self.operations
+            .push(SchemaOperation::UnionByName(Box::new(new_schema)));
         self
     }
 

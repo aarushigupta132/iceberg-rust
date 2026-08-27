@@ -23,6 +23,7 @@ use super::fresh_ids::assign_fresh_ids;
 use super::moves::{MovePosition, PendingMove};
 use super::tree::{index_parent_ids, rebuild_fields};
 use super::type_promotion::{is_promotion_allowed, promote_default, validated_primitive_type};
+use super::union::apply_union_by_name;
 use super::{AddColumn, SchemaOperation};
 use crate::spec::{
     Literal, NestedField, NestedFieldRef, PrimitiveType, SCHEMA_NAME_DELIMITER, Schema, Type,
@@ -114,6 +115,7 @@ impl<'a> PendingSchemaUpdate<'a> {
                 }
                 SchemaOperation::Move { name, position } => self.move_column(name, position)?,
                 SchemaOperation::SetIdentifierFields(names) => self.set_identifier_fields(names)?,
+                SchemaOperation::UnionByName(schema) => apply_union_by_name(self, schema)?,
                 SchemaOperation::SetCaseSensitive(case_sensitive) => {
                     self.case_sensitive = *case_sensitive;
                 }
@@ -257,10 +259,25 @@ impl<'a> PendingSchemaUpdate<'a> {
     }
 
     fn add_column(&mut self, add: &AddColumn) -> Result<()> {
+        self.add_column_internal(add, false)
+    }
+
+    pub(super) fn add_union_column(&mut self, add: &AddColumn) -> Result<()> {
+        self.add_column_internal(add, true)
+    }
+
+    fn add_column_internal(
+        &mut self,
+        add: &AddColumn,
+        allow_ambiguous_root_name: bool,
+    ) -> Result<()> {
         if add.parent.is_none() && add.name.is_empty() {
             return Err(precondition("Invalid column name: (empty)"));
         }
-        if add.parent.is_none() && add.name.contains(SCHEMA_NAME_DELIMITER) {
+        if !allow_ambiguous_root_name
+            && add.parent.is_none()
+            && add.name.contains(SCHEMA_NAME_DELIMITER)
+        {
             return Err(precondition(format!(
                 "Cannot add column with ambiguous name: {}, set a parent to add a nested column",
                 add.name
@@ -434,7 +451,7 @@ impl<'a> PendingSchemaUpdate<'a> {
         Ok(())
     }
 
-    fn set_required(&mut self, name: &str, required: bool) -> Result<()> {
+    pub(super) fn set_required(&mut self, name: &str, required: bool) -> Result<()> {
         let field = self
             .find_for_update(name)?
             .ok_or_else(|| precondition(format!("Cannot update missing column: {name}")))?;
@@ -465,7 +482,11 @@ impl<'a> PendingSchemaUpdate<'a> {
         Ok(())
     }
 
-    fn update_column_type(&mut self, name: &str, new_type: &PrimitiveType) -> Result<()> {
+    pub(super) fn update_column_type(
+        &mut self,
+        name: &str,
+        new_type: &PrimitiveType,
+    ) -> Result<()> {
         let field = self
             .find_for_update(name)?
             .ok_or_else(|| precondition(format!("Cannot update missing column: {name}")))?;
@@ -511,7 +532,7 @@ impl<'a> PendingSchemaUpdate<'a> {
         Ok(())
     }
 
-    fn update_column_doc(&mut self, name: &str, doc: &Option<String>) -> Result<()> {
+    pub(super) fn update_column_doc(&mut self, name: &str, doc: &Option<String>) -> Result<()> {
         let field = self
             .find_for_update(name)?
             .ok_or_else(|| precondition(format!("Cannot update missing column: {name}")))?;
@@ -531,7 +552,11 @@ impl<'a> PendingSchemaUpdate<'a> {
         Ok(())
     }
 
-    fn update_column_default(&mut self, name: &str, default: Option<&Literal>) -> Result<()> {
+    pub(super) fn update_column_default(
+        &mut self,
+        name: &str,
+        default: Option<&Literal>,
+    ) -> Result<()> {
         let field = self
             .find_for_update(name)?
             .ok_or_else(|| precondition(format!("Cannot update missing column: {name}")))?;
@@ -691,6 +716,14 @@ impl<'a> PendingSchemaUpdate<'a> {
 
     pub(super) fn additions(&self) -> &HashMap<Option<i32>, Vec<i32>> {
         &self.additions
+    }
+
+    pub(super) fn base_schema(&self) -> &Schema {
+        self.schema
+    }
+
+    pub(super) fn is_case_sensitive(&self) -> bool {
+        self.case_sensitive
     }
 }
 
