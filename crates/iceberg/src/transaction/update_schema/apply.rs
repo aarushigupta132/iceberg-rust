@@ -47,6 +47,17 @@ impl AddColumn {
     }
 }
 
+struct PendingIdentifierName {
+    name: String,
+    case_sensitive: bool,
+}
+
+#[derive(Default)]
+struct IdentifierFieldSelection {
+    resolved_ids: HashSet<i32>,
+    unresolved_names: Vec<PendingIdentifierName>,
+}
+
 pub(super) struct PendingSchemaUpdate<'a> {
     schema: &'a Schema,
     updates: HashMap<i32, NestedFieldRef>,
@@ -54,8 +65,10 @@ pub(super) struct PendingSchemaUpdate<'a> {
     additions: HashMap<Option<i32>, Vec<i32>>,
     moves: HashMap<Option<i32>, Vec<PendingMove>>,
     added_name_to_id: HashMap<String, i32>,
+    added_fields_by_name: Vec<(String, i32)>,
     id_to_parent: HashMap<i32, i32>,
     identifier_field_ids: HashSet<i32>,
+    identifier_field_replacement: Option<IdentifierFieldSelection>,
     last_column_id: i32,
     case_sensitive: bool,
     allow_incompatible_changes: bool,
@@ -73,8 +86,10 @@ impl<'a> PendingSchemaUpdate<'a> {
             additions: HashMap::new(),
             moves: HashMap::new(),
             added_name_to_id: HashMap::new(),
+            added_fields_by_name: Vec::new(),
             id_to_parent,
             identifier_field_ids: schema.identifier_field_ids().collect(),
+            identifier_field_replacement: None,
             last_column_id,
             case_sensitive: true,
             allow_incompatible_changes: false,
@@ -98,6 +113,7 @@ impl<'a> PendingSchemaUpdate<'a> {
                     self.update_column_default(name, default.as_ref())?
                 }
                 SchemaOperation::Move { name, position } => self.move_column(name, position)?,
+                SchemaOperation::SetIdentifierFields(names) => self.set_identifier_fields(names)?,
                 SchemaOperation::SetCaseSensitive(case_sensitive) => {
                     self.case_sensitive = *case_sensitive;
                 }
@@ -120,9 +136,19 @@ impl<'a> PendingSchemaUpdate<'a> {
             &self.moves,
             None,
         )?;
-        let schema = Schema::builder()
+        let schema_without_identifiers = Schema::builder()
             .with_fields(fields)
-            .with_identifier_field_ids(self.identifier_field_ids.iter().copied())
+            .build()
+            .map_err(|error| precondition("Cannot apply schema update").with_source(error))?;
+        let identifier_field_ids = match &self.identifier_field_replacement {
+            Some(selection) => {
+                self.resolve_identifier_fields(&schema_without_identifiers, selection)?
+            }
+            None => self.identifier_field_ids.clone(),
+        };
+        let schema = schema_without_identifiers
+            .into_builder()
+            .with_identifier_field_ids(identifier_field_ids)
             .build()
             .map_err(|error| precondition("Cannot apply schema update").with_source(error))?;
 
@@ -131,6 +157,103 @@ impl<'a> PendingSchemaUpdate<'a> {
         }
 
         Ok(schema)
+    }
+
+    fn set_identifier_fields(&mut self, names: &HashSet<String>) -> Result<()> {
+        if !self.case_sensitive {
+            validate_case_insensitive_names(self.schema)?;
+        }
+
+        let mut selection = IdentifierFieldSelection::default();
+        for name in names {
+            if let Some(field_id) = self.field_id_for_identifier(name)? {
+                selection.resolved_ids.insert(field_id);
+            } else {
+                selection.unresolved_names.push(PendingIdentifierName {
+                    name: name.clone(),
+                    case_sensitive: self.case_sensitive,
+                });
+            }
+        }
+        self.identifier_field_replacement = Some(selection);
+        Ok(())
+    }
+
+    fn resolve_identifier_fields(
+        &self,
+        schema: &Schema,
+        selection: &IdentifierFieldSelection,
+    ) -> Result<HashSet<i32>> {
+        let mut field_ids = selection.resolved_ids.clone();
+        for pending in &selection.unresolved_names {
+            if !pending.case_sensitive {
+                validate_case_insensitive_names(schema)?;
+            }
+            let field = if pending.case_sensitive {
+                schema.field_by_name(&pending.name)
+            } else {
+                schema.field_by_name_case_insensitive(&pending.name)
+            }
+            .ok_or_else(|| {
+                precondition(format!(
+                    "Cannot add field {} as an identifier field: not found in current schema or added columns",
+                    pending.name
+                ))
+            })?;
+            field_ids.insert(field.id);
+        }
+        Ok(field_ids)
+    }
+
+    fn field_id_for_identifier(&self, name: &str) -> Result<Option<i32>> {
+        let base_field = self.resolve_field(name)?;
+        let mut live_added_match = None;
+        let mut stale_added_match = None;
+        let mut multiple_live_matches = false;
+        for (_, field_id) in self.added_fields_by_name.iter().filter(|(added_name, _)| {
+            if self.case_sensitive {
+                added_name == name
+            } else {
+                added_name.to_lowercase() == name.to_lowercase()
+            }
+        }) {
+            if self.will_be_deleted(*field_id) {
+                stale_added_match.get_or_insert(*field_id);
+            } else if live_added_match.replace(*field_id).is_some() {
+                multiple_live_matches = true;
+            }
+        }
+        let live_base_field = base_field.filter(|field| !self.will_be_deleted(field.id));
+        if !self.case_sensitive
+            && (multiple_live_matches || live_added_match.is_some() && live_base_field.is_some())
+        {
+            return Err(precondition(format!(
+                "Cannot use case-insensitive schema updates because multiple fields match: {}",
+                name.to_lowercase()
+            )));
+        }
+        if let Some(field_id) = live_added_match {
+            return Ok(Some(field_id));
+        }
+        if let Some(field) = live_base_field {
+            return Ok(Some(field.id));
+        }
+        if let Some(field_id) = stale_added_match {
+            return Ok(Some(field_id));
+        }
+        Ok(base_field.map(|field| field.id))
+    }
+
+    fn will_be_deleted(&self, mut field_id: i32) -> bool {
+        loop {
+            if self.deletes.contains(&field_id) {
+                return true;
+            }
+            let Some(parent_id) = self.id_to_parent.get(&field_id).copied() else {
+                return false;
+            };
+            field_id = parent_id;
+        }
     }
 
     fn add_column(&mut self, add: &AddColumn) -> Result<()> {
@@ -180,6 +303,7 @@ impl<'a> PendingSchemaUpdate<'a> {
 
         let field = assign_fresh_ids(&add.to_nested_field(), &mut self.last_column_id)?;
         let field = coerce_field_defaults(&field, &full_name)?;
+        index_field_names(&field, full_name.clone(), &mut self.added_fields_by_name);
         index_parent_ids(
             std::slice::from_ref(&field),
             parent_id,
@@ -510,13 +634,25 @@ impl<'a> PendingSchemaUpdate<'a> {
     }
 
     fn validate_identifier_deletions(&self) -> Result<()> {
-        for identifier_id in &self.identifier_field_ids {
-            let identifier = self.schema.field_by_id(*identifier_id).ok_or_else(|| {
-                Error::new(
+        let identifier_field_ids = self
+            .identifier_field_replacement
+            .as_ref()
+            .map(|selection| &selection.resolved_ids)
+            .unwrap_or(&self.identifier_field_ids);
+        for identifier_id in identifier_field_ids {
+            let Some(identifier) = self.schema.field_by_id(*identifier_id) else {
+                if self
+                    .added_fields_by_name
+                    .iter()
+                    .any(|(_, added_id)| added_id == identifier_id)
+                {
+                    continue;
+                }
+                return Err(Error::new(
                     ErrorKind::Unexpected,
                     format!("Identifier field {identifier_id} is missing from the schema"),
-                )
-            })?;
+                ));
+            };
 
             if self.deletes.contains(identifier_id) {
                 return Err(precondition(format!(
@@ -555,6 +691,27 @@ impl<'a> PendingSchemaUpdate<'a> {
 
     pub(super) fn additions(&self) -> &HashMap<Option<i32>, Vec<i32>> {
         &self.additions
+    }
+}
+
+fn index_field_names(field: &NestedFieldRef, full_name: String, result: &mut Vec<(String, i32)>) {
+    result.push((full_name.clone(), field.id));
+    match field.field_type.as_ref() {
+        Type::Struct(struct_type) => {
+            for child in struct_type.fields() {
+                index_field_names(child, format!("{full_name}.{}", child.name), result);
+            }
+        }
+        Type::List(list_type) => {
+            let element = &list_type.element_field;
+            index_field_names(element, format!("{full_name}.{}", element.name), result);
+        }
+        Type::Map(map_type) => {
+            for child in [&map_type.key_field, &map_type.value_field] {
+                index_field_names(child, format!("{full_name}.{}", child.name), result);
+            }
+        }
+        Type::Primitive(_) | Type::Variant(_) => {}
     }
 }
 

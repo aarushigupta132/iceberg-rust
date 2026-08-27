@@ -38,6 +38,9 @@ mod defaults_tests;
 #[path = "tests/docs.rs"]
 mod docs_tests;
 #[cfg(test)]
+#[path = "tests/identifier_fields.rs"]
+mod identifier_field_tests;
+#[cfg(test)]
 #[path = "tests/moves.rs"]
 mod move_tests;
 #[cfg(test)]
@@ -60,6 +63,8 @@ mod type_promotion_tests;
 #[cfg(test)]
 #[path = "tests/write_defaults.rs"]
 mod write_default_tests;
+
+use std::collections::HashSet;
 
 use typed_builder::TypedBuilder;
 
@@ -176,6 +181,7 @@ enum SchemaOperation {
         name: String,
         position: MovePosition,
     },
+    SetIdentifierFields(HashSet<String>),
     SetCaseSensitive(bool),
     AllowIncompatibleChanges,
 }
@@ -312,6 +318,21 @@ impl UpdateSchemaAction {
             name: name.to_string(),
             position: MovePosition::After(after_name.to_string()),
         });
+        self
+    }
+
+    /// Replace the schema's identifier fields with the supplied column names.
+    ///
+    /// Duplicate names are ignored and an empty iterator clears the identifier fields. Names use
+    /// the case-sensitivity mode active at this point in the action.
+    pub fn set_identifier_fields<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: ToString,
+    {
+        self.operations.push(SchemaOperation::SetIdentifierFields(
+            names.into_iter().map(|name| name.to_string()).collect(),
+        ));
         self
     }
 
