@@ -18,6 +18,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use super::moves::{PendingMove, apply_moves};
 use crate::spec::{ListType, MapType, NestedFieldRef, StructType, Type};
 use crate::{Error, ErrorKind, Result};
 
@@ -70,12 +71,13 @@ pub(super) fn rebuild_fields(
     updates: &HashMap<i32, NestedFieldRef>,
     additions: &HashMap<Option<i32>, Vec<i32>>,
     deletes: &HashSet<i32>,
+    moves: &HashMap<Option<i32>, Vec<PendingMove>>,
     parent_id: Option<i32>,
 ) -> Result<Vec<NestedFieldRef>> {
     let mut rebuilt =
         Vec::with_capacity(fields.len() + additions.get(&parent_id).map_or(0, Vec::len));
     for field in fields {
-        let rebuilt_field = rebuild_field(field, updates, additions, deletes)?;
+        let rebuilt_field = rebuild_field(field, updates, additions, deletes, moves)?;
         if !deletes.contains(&field.id) {
             rebuilt.push(rebuilt_field);
         }
@@ -87,6 +89,9 @@ pub(super) fn rebuild_fields(
             })?);
         }
     }
+    if let Some(pending_moves) = moves.get(&parent_id) {
+        apply_moves(&mut rebuilt, pending_moves)?;
+    }
     Ok(rebuilt)
 }
 
@@ -95,6 +100,7 @@ fn rebuild_field(
     updates: &HashMap<i32, NestedFieldRef>,
     additions: &HashMap<Option<i32>, Vec<i32>>,
     deletes: &HashSet<i32>,
+    moves: &HashMap<Option<i32>, Vec<PendingMove>>,
 ) -> Result<NestedFieldRef> {
     let pending = updates.get(&field.id).unwrap_or(field);
     match field.field_type.as_ref() {
@@ -105,6 +111,7 @@ fn rebuild_field(
                 updates,
                 additions,
                 deletes,
+                moves,
                 Some(field.id),
             )?;
             Ok(Arc::new(crate::spec::NestedField {
@@ -124,7 +131,8 @@ fn rebuild_field(
                     field.name
                 )));
             }
-            let element = rebuild_field(&list_type.element_field, updates, additions, deletes)?;
+            let element =
+                rebuild_field(&list_type.element_field, updates, additions, deletes, moves)?;
             let element = crate::spec::NestedField::list_element(
                 element.id,
                 element.field_type.as_ref().clone(),
@@ -163,7 +171,13 @@ fn rebuild_field(
                     field.name
                 )));
             }
-            let key = rebuild_field(&map_type.key_field, updates, additions, deletes)?;
+            if moves.contains_key(&Some(key_id)) {
+                return Err(precondition(format!(
+                    "Cannot alter map keys: {}",
+                    field.name
+                )));
+            }
+            let key = rebuild_field(&map_type.key_field, updates, additions, deletes, moves)?;
             if key.as_ref() != map_type.key_field.as_ref() {
                 return Err(precondition(format!(
                     "Cannot alter map keys: {}",
@@ -176,7 +190,7 @@ fn rebuild_field(
                     field.name
                 )));
             }
-            let value = rebuild_field(&map_type.value_field, updates, additions, deletes)?;
+            let value = rebuild_field(&map_type.value_field, updates, additions, deletes, moves)?;
             let value = crate::spec::NestedField::map_value_element(
                 value.id,
                 value.field_type.as_ref().clone(),

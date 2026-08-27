@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use super::defaults::{coerce_default, coerce_field_defaults, defaults_equal};
 use super::fresh_ids::assign_fresh_ids;
+use super::moves::{MovePosition, PendingMove};
 use super::tree::{index_parent_ids, rebuild_fields};
 use super::type_promotion::{is_promotion_allowed, promote_default, validated_primitive_type};
 use super::{AddColumn, SchemaOperation};
@@ -51,6 +52,7 @@ pub(super) struct PendingSchemaUpdate<'a> {
     updates: HashMap<i32, NestedFieldRef>,
     deletes: HashSet<i32>,
     additions: HashMap<Option<i32>, Vec<i32>>,
+    moves: HashMap<Option<i32>, Vec<PendingMove>>,
     added_name_to_id: HashMap<String, i32>,
     id_to_parent: HashMap<i32, i32>,
     identifier_field_ids: HashSet<i32>,
@@ -69,6 +71,7 @@ impl<'a> PendingSchemaUpdate<'a> {
             updates: HashMap::new(),
             deletes: HashSet::new(),
             additions: HashMap::new(),
+            moves: HashMap::new(),
             added_name_to_id: HashMap::new(),
             id_to_parent,
             identifier_field_ids: schema.identifier_field_ids().collect(),
@@ -94,6 +97,7 @@ impl<'a> PendingSchemaUpdate<'a> {
                 SchemaOperation::UpdateDefault { name, default } => {
                     self.update_column_default(name, default.as_ref())?
                 }
+                SchemaOperation::Move { name, position } => self.move_column(name, position)?,
                 SchemaOperation::SetCaseSensitive(case_sensitive) => {
                     self.case_sensitive = *case_sensitive;
                 }
@@ -113,6 +117,7 @@ impl<'a> PendingSchemaUpdate<'a> {
             &self.updates,
             &self.additions,
             &self.deletes,
+            &self.moves,
             None,
         )?;
         let schema = Schema::builder()
@@ -175,6 +180,11 @@ impl<'a> PendingSchemaUpdate<'a> {
 
         let field = assign_fresh_ids(&add.to_nested_field(), &mut self.last_column_id)?;
         let field = coerce_field_defaults(&field, &full_name)?;
+        index_parent_ids(
+            std::slice::from_ref(&field),
+            parent_id,
+            &mut self.id_to_parent,
+        );
         self.added_name_to_id
             .insert(self.case_sensitivity_aware_name(&full_name), field.id);
         self.additions.entry(parent_id).or_default().push(field.id);
@@ -224,6 +234,79 @@ impl<'a> PendingSchemaUpdate<'a> {
         let mut updated = (*current).clone();
         updated.name = new_name.to_string();
         self.updates.insert(updated.id, Arc::new(updated));
+        Ok(())
+    }
+
+    fn move_column(&mut self, name: &str, position: &MovePosition) -> Result<()> {
+        let field_id = self
+            .field_id_for_move(name)?
+            .ok_or_else(|| precondition(format!("Cannot move missing column: {name}")))?;
+        let parent_id = self.id_to_parent.get(&field_id).copied();
+        let (pending_move, reference_id) = match position {
+            MovePosition::First => (PendingMove::first(field_id), None),
+            MovePosition::Before(reference) => {
+                let reference_id = self.field_id_for_move(reference)?.ok_or_else(|| {
+                    precondition(format!(
+                        "Cannot move {name} before missing column: {reference}"
+                    ))
+                })?;
+                if field_id == reference_id {
+                    return Err(precondition(format!("Cannot move {name} before itself")));
+                }
+                (
+                    PendingMove::before(field_id, reference_id),
+                    Some(reference_id),
+                )
+            }
+            MovePosition::After(reference) => {
+                let reference_id = self.field_id_for_move(reference)?.ok_or_else(|| {
+                    precondition(format!(
+                        "Cannot move {name} after missing column: {reference}"
+                    ))
+                })?;
+                if field_id == reference_id {
+                    return Err(precondition(format!("Cannot move {name} after itself")));
+                }
+                (
+                    PendingMove::after(field_id, reference_id),
+                    Some(reference_id),
+                )
+            }
+        };
+
+        if let Some(parent_id) = parent_id {
+            let parent = self.field_by_id(parent_id).ok_or_else(|| {
+                Error::new(
+                    ErrorKind::Unexpected,
+                    format!("Parent field {parent_id} is missing for column {name}"),
+                )
+            })?;
+            if !parent.field_type.is_struct() {
+                return Err(precondition(format!(
+                    "Cannot move fields in non-struct type: {}",
+                    parent.field_type
+                )));
+            }
+        }
+        if let Some(reference_id) = reference_id {
+            self.validate_move_parent(name, parent_id, reference_id)?;
+        }
+
+        self.moves.entry(parent_id).or_default().push(pending_move);
+        Ok(())
+    }
+
+    fn validate_move_parent(
+        &self,
+        name: &str,
+        parent_id: Option<i32>,
+        reference_id: i32,
+    ) -> Result<()> {
+        if self.id_to_parent.get(&reference_id).copied() != parent_id {
+            return Err(precondition(format!(
+                "Cannot move field {name} to a different struct"
+            )));
+        }
         Ok(())
     }
 
@@ -400,6 +483,22 @@ impl<'a> PendingSchemaUpdate<'a> {
             .get(&self.case_sensitivity_aware_name(name))
             .and_then(|id| self.updates.get(id))
             .cloned())
+    }
+
+    fn field_id_for_move(&self, name: &str) -> Result<Option<i32>> {
+        if let Some(field_id) = self
+            .added_name_to_id
+            .get(&self.case_sensitivity_aware_name(name))
+        {
+            return Ok(Some(*field_id));
+        }
+        Ok(self.resolve_field(name)?.map(|field| field.id))
+    }
+
+    fn field_by_id(&self, field_id: i32) -> Option<&NestedFieldRef> {
+        self.updates
+            .get(&field_id)
+            .or_else(|| self.schema.field_by_id(field_id))
     }
 
     fn case_sensitivity_aware_name(&self, name: &str) -> String {

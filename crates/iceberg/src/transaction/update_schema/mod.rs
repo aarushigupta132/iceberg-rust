@@ -20,6 +20,7 @@ mod column_properties;
 mod commit;
 mod defaults;
 mod fresh_ids;
+mod moves;
 mod name_mapping;
 mod tree;
 mod type_promotion;
@@ -36,6 +37,9 @@ mod defaults_tests;
 #[cfg(test)]
 #[path = "tests/docs.rs"]
 mod docs_tests;
+#[cfg(test)]
+#[path = "tests/moves.rs"]
+mod move_tests;
 #[cfg(test)]
 #[path = "tests/name_mapping.rs"]
 mod name_mapping_tests;
@@ -59,6 +63,7 @@ mod write_default_tests;
 
 use typed_builder::TypedBuilder;
 
+use self::moves::MovePosition;
 use crate::spec::{Literal, PrimitiveType, Type};
 
 /// Declarative specification for adding a column in an [`UpdateSchemaAction`].
@@ -166,6 +171,10 @@ enum SchemaOperation {
     UpdateDefault {
         name: String,
         default: Option<Literal>,
+    },
+    Move {
+        name: String,
+        position: MovePosition,
     },
     SetCaseSensitive(bool),
     AllowIncompatibleChanges,
@@ -275,6 +284,33 @@ impl UpdateSchemaAction {
         self.operations.push(SchemaOperation::UpdateDefault {
             name: name.to_string(),
             default,
+        });
+        self
+    }
+
+    /// Move a column to the first position in its containing struct.
+    pub fn move_column_first(mut self, name: impl ToString) -> Self {
+        self.operations.push(SchemaOperation::Move {
+            name: name.to_string(),
+            position: MovePosition::First,
+        });
+        self
+    }
+
+    /// Move a column immediately before a sibling column.
+    pub fn move_column_before(mut self, name: impl ToString, before_name: impl ToString) -> Self {
+        self.operations.push(SchemaOperation::Move {
+            name: name.to_string(),
+            position: MovePosition::Before(before_name.to_string()),
+        });
+        self
+    }
+
+    /// Move a column immediately after a sibling column.
+    pub fn move_column_after(mut self, name: impl ToString, after_name: impl ToString) -> Self {
+        self.operations.push(SchemaOperation::Move {
+            name: name.to_string(),
+            position: MovePosition::After(after_name.to_string()),
         });
         self
     }

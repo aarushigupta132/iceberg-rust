@@ -3271,6 +3271,9 @@ pub fn iceberg::transaction::UpdateSchemaAction::allow_incompatible_changes(self
 pub fn iceberg::transaction::UpdateSchemaAction::case_sensitive(self, case_sensitive: bool) -> Self
 pub fn iceberg::transaction::UpdateSchemaAction::delete_column(self, name: impl alloc::string::ToString) -> Self
 pub fn iceberg::transaction::UpdateSchemaAction::make_column_optional(self, name: impl alloc::string::ToString) -> Self
+pub fn iceberg::transaction::UpdateSchemaAction::move_column_after(self, name: impl alloc::string::ToString, after_name: impl alloc::string::ToString) -> Self
+pub fn iceberg::transaction::UpdateSchemaAction::move_column_before(self, name: impl alloc::string::ToString, before_name: impl alloc::string::ToString) -> Self
+pub fn iceberg::transaction::UpdateSchemaAction::move_column_first(self, name: impl alloc::string::ToString) -> Self
 pub fn iceberg::transaction::UpdateSchemaAction::rename_column(self, name: impl alloc::string::ToString, new_name: impl alloc::string::ToString) -> Self
 pub fn iceberg::transaction::UpdateSchemaAction::require_column(self, name: impl alloc::string::ToString) -> Self
 pub fn iceberg::transaction::UpdateSchemaAction::update_column_default(self, name: impl alloc::string::ToString, default: core::option::Option<iceberg::spec::Literal>) -> Self
